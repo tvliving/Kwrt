@@ -124,12 +124,35 @@ jobs:
         run: |
           cd openwrt
           cp -rn devices/common/patches "devices/$TARGET/" 2>/dev/null || true
+
+          # ── U-Boot 源码补丁单独路由 ───────────────────────────────────────────
+          # *.uboot.patch 里的路径（configs/ 、arch/arm/dts/ 、defenvs/）都是 u-boot
+          # 源码树内的相对路径，必须交给 uboot-mediatek 包在解压后的 u-boot 源码里打。
+          # 若在 openwrt 根目录直接 patch，文件会被写到 openwrt/configs/ 等错误位置，
+          # uboot 变体 mt7981_philips_hy3000 就找不到 defconfig，编译直接失败。
+          UBP=package/boot/uboot-mediatek/patches
+          mkdir -p "$UBP"
+          shopt -s nullglob
+          for f in "devices/$TARGET"/patches/*.uboot.patch; do
+            dst="$UBP/$(basename "$f" .uboot.patch).patch"
+            cp -f "$f" "$dst"
+            echo ">>> U-Boot 补丁就位: $dst"
+            for need in configs/mt7981_philips_hy3000_defconfig \
+                        arch/arm/dts/mt7981-philips-hy3000.dts \
+                        defenvs/philips_hy3000_env; do
+              grep -qF "+++ b/$need" "$dst" || { echo "::error::$dst 缺少 $need"; exit 1; }
+            done
+          done
+          shopt -u nullglob
+          grep -q '^define U-Boot/mt7981_philips_hy3000' package/boot/uboot-mediatek/Makefile \
+            || { echo "::error::uboot-mediatek Makefile 未注册 mt7981_philips_hy3000 变体"; exit 1; }
+
           if [ -n "$(ls -A "devices/$TARGET"/*.bin.patch 2>/dev/null)" ]; then
             git apply "devices/$TARGET"/patches/*.bin.patch || true
           fi
           find "devices/$TARGET/patches" -maxdepth 1 -type f -name '*.revert.patch' -print0 2>/dev/null \
             | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' -R --no-backup-if-mismatch -p1 -F 1 -i '%'" || true
-          find "devices/$TARGET/patches" -maxdepth 1 -type f -name '*.patch' ! -name '*.revert.patch' ! -name '*.bin.patch' -print0 2>/dev/null \
+          find "devices/$TARGET/patches" -maxdepth 1 -type f -name '*.patch' ! -name '*.revert.patch' ! -name '*.bin.patch' ! -name '*.uboot.patch' -print0 2>/dev/null \
             | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' --no-backup-if-mismatch -p1 -F 1 -i '%'" || true
 
       - name: defconfig 并校验机型
@@ -154,11 +177,18 @@ jobs:
           set -o pipefail
           cd openwrt
           df -hT
-          make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log || {
+          if ! make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log; then
             echo "::warning::并行编译失败，取错误日志"
-            grep -nE 'Error [0-9]+|error:|No rule to make target' build.log | tail -40 || true
+            grep -nE 'Error [0-9]+|error:|No rule to make target|failed to build' build.log | tail -40 || true
+            # 并行编译的输出会掩盖真正原因：定位失败包后单线程 V=s 重跑一次，把详细错误留在日志里
+            pkgs=$(grep -oE '[A-Za-z0-9_./-]+ failed to build' build.log | awk '{print $1}' | sort -u || true)
+            for pkg in $pkgs; do
+              echo "" >> build.log
+              echo "===== 详细错误（make -j1 V=s $pkg/compile）=====" >> build.log
+              timeout 2400 make -j1 V=s "$pkg/compile" 2>&1 | tail -200 | tee -a build.log || true
+            done
             exit 1
-          }
+          fi
           df -hT
 
       - name: 上传编译日志（失败时）
