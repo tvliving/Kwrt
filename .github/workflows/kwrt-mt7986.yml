@@ -23,7 +23,7 @@ concurrency:
 
 env:
   TZ: Asia/Shanghai
-  TARGET: devices/mediatek_filogic_mt7986
+  TARGET: mediatek_filogic_mt7986
   TAG_PREFIX: kwrt-mt7986
   MIN_DEVICES: '40'
 
