@@ -150,8 +150,9 @@ jobs:
           grep -q '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cudy_tr3000-512mb-v1=y$' .config \
             || { echo "::error::cudy_tr3000-512mb-v1 未生效"; exit 1; }
           grep -q '^CONFIG_TARGET_mediatek_filogic=y' .config || { echo "::error::target 未生效"; exit 1; }
-          # 512MB NAND 校验：rootfs 体积必须小于 UBI 分区
-          ps=$(grep -oP '^CONFIG_TARGET_ROOTFS_PARTSIZE="\K[0-9]+' .config || echo 0)
+          # 512MB NAND 校验：rootfs 体积必须小于 UBI 分区（.config 中值可能带或不带引号）
+          ps=$(sed -n 's/^CONFIG_TARGET_ROOTFS_PARTSIZE="\{0,1\}\([0-9]\+\)"\{0,1\}$/\1/p' .config | tail -1)
+          ps=${ps:-0}
           echo "ROOTFS_PARTSIZE=${ps}M（UBI 分区约 505MiB）"
           [ "$ps" -gt 0 ] && [ "$ps" -lt 480 ] || { echo "::error::rootfs 体积超出 512MB NAND"; exit 1; }
 
