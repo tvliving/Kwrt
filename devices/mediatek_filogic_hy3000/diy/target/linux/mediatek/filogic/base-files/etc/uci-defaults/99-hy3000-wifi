@@ -1,0 +1,10 @@
+#!/bin/sh
+# PHILIPS HY3000：确保 WiFi（MT7981 2.4G + 5G 双频）默认开启
+# 修复刷机后 WiFi 被禁用的问题（此前 iStoreOS 默认 radio disabled 导致）
+wifi config 2>/dev/null || true
+
+for r in $(uci -q show wireless | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1/p"); do
+	uci set wireless.$r.disabled='0'
+	uci set wireless.$r.country='CN'
+done
+uci -q commit wireless || true
