@@ -56,6 +56,7 @@ while [[ "$status" == "in_progress" || "$status" == "queued" ]];do
 done
 
 wget -N https://raw.githubusercontent.com/openwrt/packages/master/lang/golang/golang/Makefile -P feeds/packages/lang/golang/golang/
+wget -N https://raw.githubusercontent.com/openwrt/packages/master/lang/golang/golang-values.mk -P feeds/packages/lang/golang/
 
 #sed -i "/call Build\/check-size,\$\$(KERNEL_SIZE)/d" include/image.mk
 
