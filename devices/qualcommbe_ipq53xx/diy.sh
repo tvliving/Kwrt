@@ -15,9 +15,12 @@ rm -rf package/feeds/kiddin9/{quectel_QMI_WWAN,simcom_QMI_WWAN,fibocom_QMI_WWAN,
 
 # ---- backports 7.2 只兼容 6.19+：struct sockaddr_unsized 在 6.18 不存在，
 # ath12k/qmi.c 调用 backport_kernel_connect 会报 incompatible pointer type
-# （run 43191716753）→ 在 backports 源码里补一个兼容定义 ----
-mkdir -p package/kernel/mac80211/patches-qualcommbe
-cat > package/kernel/mac80211/patches-qualcommbe/999-backport-sockaddr-unsized.patch <<'PATCH'
+# （run 43191716753/43217772771）→ 在 backports 源码里补一个兼容定义
+# 注意：mac80211 的 Build/Patch 只加载 patches-*/{build,subsys,ath,ath12k,...}
+# 子目录里的补丁，放在 patches-qualcommbe/ 根目录的会被静默忽略（上一轮即因此无效）
+mkdir -p package/kernel/mac80211/patches-qualcommbe/build
+rm -f package/kernel/mac80211/patches-qualcommbe/999-backport-sockaddr-unsized.patch
+cat > package/kernel/mac80211/patches-qualcommbe/build/999-backport-sockaddr-unsized.patch <<'PATCH'
 --- a/backport-include/linux/net.h
 +++ b/backport-include/linux/net.h
 @@ -7,9 +7,17 @@
