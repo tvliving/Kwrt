@@ -1,0 +1,231 @@
+# Kwrt（kiddin9/Kwrt）MT7981 (Filogic 820) 固件构建
+# 构建方式完全沿用 Kwrt 官方配方：openwrt/openwrt openwrt-25.12 源码
+# + devices/common 的 diy 定制（kiddin9 软件源、内核补丁等）+ 本机型目录的配置
+name: 🛠️ Kwrt IPQ53XX (QualcommBE) Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      make_release:
+        description: 编译完成后发布 Release
+        type: boolean
+        default: true
+  schedule:
+    # 每周三 10:00 北京时间起，各 target 依次错开 3 小时（UTC）
+    - cron: '0 14 * * 3'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kwrt-qualcommbe_ipq53xx
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Shanghai
+  TARGET: qualcommbe_ipq53xx
+  TAG_PREFIX: kwrt-qualcommbe_ipq53xx
+  MIN_DEVICES: '2'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout 构建配方
+        uses: actions/checkout@v4
+
+      - name: 获取日期
+        run: echo "DATE=$(date +%Y%m%d)" >> "$GITHUB_ENV"
+
+      - name: 释放磁盘空间
+        uses: coder-xiaomo/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: 安装编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget dwarves \
+            llvm python3-pyelftools libpython3-dev aria2 jq qemu-utils ccache rename \
+            libelf-dev device-tree-compiler libgmp3-dev libmpc-dev libfuse-dev
+          sudo timedatectl set-timezone "Asia/Shanghai"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+      - name: 克隆 OpenWrt 源码（openwrt-25.12）
+        run: |
+          set -x
+          git clone --depth 1 -b openwrt-25.12 https://github.com/openwrt/openwrt openwrt
+
+      - name: 构建目录挂到大盘
+        run: |
+          sudo mkdir -p -m 777 /mnt/openwrt/build_dir openwrt/staging_dir
+          ln -sf /mnt/openwrt/build_dir openwrt/build_dir
+          sudo ln -sf "$PWD/openwrt/staging_dir" /mnt/openwrt/staging_dir
+
+      - name: 载入 Kwrt 定制（common diy.sh）
+        run: |
+          function git_clone_path() {
+            trap 'rm -rf "$tmpdir"' EXIT
+            branch="$1" rurl="$2" mv="$3"
+            [[ "$mv" != "mv" ]] && shift 2 || shift 3
+            rootdir="$PWD"
+            tmpdir="$(mktemp -d)" || exit 1
+            if [ ${#branch} -lt 10 ]; then
+              git clone -b "$branch" --depth 1 --filter=blob:none --sparse "$rurl" "$tmpdir"
+              cd "$tmpdir"
+            else
+              git clone --filter=blob:none --sparse "$rurl" "$tmpdir"
+              cd "$tmpdir"
+              git checkout $branch
+            fi
+            git sparse-checkout init --cone
+            git sparse-checkout set $@
+            [[ "$mv" != "mv" ]] && cp -rn ./* $rootdir/ || mv -n $@/* $rootdir/$@/
+            cd $rootdir
+          }
+          export -f git_clone_path
+          export REPO_TOKEN="${{ secrets.KWRT_TOKEN }}"
+          mkdir -p openwrt
+          cp -rf devices/common/. openwrt/
+          cp -rf "devices/$TARGET/." openwrt/
+          cp -rf devices openwrt/
+          cd openwrt
+          chmod +x devices/common/diy.sh
+          /bin/bash devices/common/diy.sh
+
+      - name: 生成 .config（Kwrt common + IPQ53XX (QualcommBE) 机型）
+        run: |
+          function git_clone_path() {
+            trap 'rm -rf "$tmpdir"' EXIT
+            branch="$1" rurl="$2" mv="$3"
+            [[ "$mv" != "mv" ]] && shift 2 || shift 3
+            rootdir="$PWD"
+            tmpdir="$(mktemp -d)" || exit 1
+            if [ ${#branch} -lt 10 ]; then
+              git clone -b "$branch" --depth 1 --filter=blob:none --sparse "$rurl" "$tmpdir"
+              cd "$tmpdir"
+            else
+              git clone --filter=blob:none --sparse "$rurl" "$tmpdir"
+              cd "$tmpdir"
+              git checkout $branch
+            fi
+            git sparse-checkout init --cone
+            git sparse-checkout set $@
+            [[ "$mv" != "mv" ]] && cp -rn ./* $rootdir/ || mv -n $@/* $rootdir/$@/
+            cd $rootdir
+          }
+          export -f git_clone_path
+          export REPO_TOKEN="${{ secrets.KWRT_TOKEN }}"
+          cd openwrt
+          cp -f devices/common/.config .config
+          echo >> .config
+          cat "devices/$TARGET/.config" >> .config
+          if [ -f "devices/$TARGET/diy.sh" ]; then
+            chmod +x "devices/$TARGET/diy.sh"
+            /bin/bash "devices/$TARGET/diy.sh"
+          fi
+          cp -Rf ./diy/* ./ 2>/dev/null || true
+
+      - name: 应用补丁
+        run: |
+          cd openwrt
+          cp -rn devices/common/patches "devices/$TARGET/" 2>/dev/null || true
+          if [ -n "$(ls -A "devices/$TARGET"/*.bin.patch 2>/dev/null)" ]; then
+            git apply "devices/$TARGET"/patches/*.bin.patch || true
+          fi
+          find "devices/$TARGET/patches" -maxdepth 1 -type f -name '*.revert.patch' -print0 2>/dev/null \
+            | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' -R --no-backup-if-mismatch -p1 -F 1 -i '%'" || true
+          find "devices/$TARGET/patches" -maxdepth 1 -type f -name '*.patch' ! -name '*.revert.patch' ! -name '*.bin.patch' -print0 2>/dev/null \
+            | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' --no-backup-if-mismatch -p1 -F 1 -i '%'" || true
+
+      - name: defconfig 并校验机型
+        run: |
+          cd openwrt
+          make defconfig
+          # 与 Kwrt 官方一致：无 WiFi 的目标跳过无线驱动置 n
+          if [[ ! "$TARGET" =~ (amlogic_meson8b|armsr_armv8|bcm27xx_*|rockchip_armv8|sunxi_*|siflower_*|x86_*) ]]; then
+            sed -n '/# Wireless Drivers/,/# end of Wireless Drivers/p' .config | sed -e 's/=m/=n/' >> .config
+            sed -i "s/\(kmod-qca.*\)=m/\1=n/" .config
+            make defconfig
+          fi
+
+          echo "===== 启用的机型数 ====="
+          n=$(grep -cE '^CONFIG_TARGET_DEVICE_qualcommbe_ipq53xx_DEVICE_.*=y$' .config || true)
+          echo "启用机型: $n（下限 $MIN_DEVICES）"
+          grep -E '^CONFIG_TARGET_DEVICE_qualcommbe_ipq53xx_DEVICE_.*=y$' .config | head -5
+          [ "$n" -ge "$MIN_DEVICES" ] || { echo "::error::机型数量不足，实际 $n"; exit 1; }
+          grep -q '^CONFIG_TARGET_qualcommbe_ipq53xx=y' .config || { echo "::error::target 未生效"; exit 1; }
+
+      - name: 编译固件
+        run: |
+          set -o pipefail
+          cd openwrt
+          df -hT
+          make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log || {
+            echo "::warning::并行编译失败，取错误日志"
+            grep -nE 'Error [0-9]+|error:|No rule to make target' build.log | tail -40 || true
+            exit 1
+          }
+          df -hT
+
+      - name: 上传编译日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            openwrt/build.log
+            openwrt/logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: 收集产物
+        id: collect
+        run: |
+          mkdir -p out
+          find openwrt/bin/targets/qualcommbe/ipq53xx -maxdepth 1 -type f \
+            \( -name '*.bin' -o -name '*.itb' -o -name '*.ubi' -o -name '*.tar' \
+               -o -name '*.img' -o -name '*.gz' -o -name 'profiles.json' \
+               -o -name 'sha256sums' -o -name '*manifest' \) -exec cp -f {} out/ \;
+          ls -lh out | head -20
+          cnt=$(ls out | wc -l)
+          echo "产物文件数: $cnt"
+          [ "$cnt" -ge 3 ] || { echo "::error::产物为空，疑似假成功"; exit 1; }
+          DU=$(du -sh out | cut -f1)
+          echo "size=$DU" >> "$GITHUB_OUTPUT"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: kwrt-qualcommbe_ipq53xx-images
+          path: out/
+          retention-days: 14
+
+      - name: 发布 Release
+        if: ${{ github.event_name == 'schedule' || inputs.make_release != false }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_PREFIX }}-${{ env.DATE }}
+          name: Kwrt IPQ53XX (QualcommBE) (${{ env.DATE }})
+          body: |
+            Kwrt IPQ53XX (QualcommBE) 自动编译（qualcommbe/ipq53xx）
+
+            - 源码: openwrt/openwrt `openwrt-25.12` + Kwrt `devices/common` 定制
+            - 机型: IPQ53XX (QualcommBE) 全部机型（配方目录 devices/qualcommbe_ipq53xx）
+            - 默认 IP: 10.0.0.1 / 用户名 root / 无密码
+            - 工作流: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          files: out/*
+          fail_on_unmatched_files: false
