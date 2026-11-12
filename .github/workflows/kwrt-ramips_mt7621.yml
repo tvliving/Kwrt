@@ -216,16 +216,42 @@ jobs:
 
       - name: 发布 Release
         if: ${{ github.event_name == 'schedule' || inputs.make_release != false }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.TAG_PREFIX }}-${{ env.DATE }}
-          name: Kwrt MT7621 (ramips) (${{ env.DATE }})
-          body: |
-            Kwrt MT7621 (ramips) 自动编译（ramips/mt7621）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          TAG="${{ env.TAG_PREFIX }}-${{ env.DATE }}"
+          cat > notes.md <<'NOTES'
+          Kwrt MT7621 (ramips) 自动编译（ramips/mt7621）
 
-            - 源码: openwrt/openwrt `openwrt-25.12` + Kwrt `devices/common` 定制
-            - 机型: MT7621 (ramips) 全部机型（配方目录 devices/ramips_mt7621）
-            - 默认 IP: 10.0.0.1 / 用户名 root / 无密码
-            - 工作流: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          files: out/*
-          fail_on_unmatched_files: false
+          - 源码: openwrt/openwrt `openwrt-25.12` + Kwrt `devices/common` 定制
+          - 机型: MT7621 (ramips) 全部机型（配方目录 devices/ramips_mt7621）
+          - 默认 IP: 10.0.0.1 / 用户名 root / 无密码
+          NOTES
+          echo "- 工作流: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> notes.md
+
+          # 该 target 有 600+ 个资产，并发上传会触发 GitHub secondary rate limit
+          # （run 43217757626 传 540/621 后被限流），改为逐个上传 + 指数退避重试
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，追加缺失资产"
+          else
+            for i in 1 2 3 4 5; do
+              gh release create "$TAG" --title "Kwrt MT7621 (ramips) (${{ env.DATE }})" --notes-file notes.md && break
+              echo "创建 Release 失败（第 $i 次），等待重试"; sleep $((i * 20))
+            done
+          fi
+          gh release view "$TAG" >/dev/null || { echo "::error::Release $TAG 创建失败"; exit 1; }
+
+          total=0; failed=0
+          for f in out/*; do
+            total=$((total + 1))
+            ok=0
+            for i in 1 2 3 4 5; do
+              if gh release upload "$TAG" "$f" --clobber >/dev/null 2>&1; then ok=1; break; fi
+              sleep $((i * 10))
+            done
+            [ "$ok" -eq 1 ] || { echo "::warning::上传失败: $f"; failed=$((failed + 1)); }
+          done
+          echo "资产总数: $total | 失败: $failed"
+          [ "$failed" -eq 0 ] || { echo "::error::$failed 个资产上传失败"; exit 1; }
+
