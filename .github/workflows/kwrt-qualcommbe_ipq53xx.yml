@@ -174,11 +174,23 @@ jobs:
           set -o pipefail
           cd openwrt
           df -hT
-          make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log || {
-            echo "::warning::并行编译失败，取错误日志"
-            grep -nE 'Error [0-9]+|error:|No rule to make target' build.log | tail -40 || true
+          rc=0
+          make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log || rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::并行编译失败，对失败包逐个 -j1 V=s 复现真实错误"
+            FAILED=$(grep -oE "ERROR: \S+ failed to build( \(build variant: \S+\))?" build.log | awk '{print $2}' | sort -u || true)
+            if [ -z "$FAILED" ]; then
+              make -j1 V=s 2>&1 | tee error.log || true
+            else
+              for p in $FAILED; do
+                echo "===== V=s 复现 $p ====="
+                make -j1 V=s "$p/compile" 2>&1 | tee -a error.log || true
+              done
+            fi
+            echo "===== error.log 尾部 150 行（真实错误） ====="
+            tail -n 150 error.log 2>/dev/null || true
             exit 1
-          }
+          fi
           df -hT
 
       - name: 上传编译日志（失败时）
@@ -188,6 +200,7 @@ jobs:
           name: build-log
           path: |
             openwrt/build.log
+            openwrt/error.log
             openwrt/logs/
           retention-days: 7
           if-no-files-found: ignore
