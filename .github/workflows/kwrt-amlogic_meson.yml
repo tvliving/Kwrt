@@ -25,7 +25,7 @@ env:
   TZ: Asia/Shanghai
   TARGET: amlogic_meson
   TAG_PREFIX: kwrt-amlogic_meson
-  MIN_DEVICES: '2'
+  MIN_DEVICES: '1'
 
 jobs:
   build:
