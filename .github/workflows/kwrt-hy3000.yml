@@ -212,6 +212,8 @@ jobs:
           for f in sysupgrade.itb gpt.bin preloader.bin bl31-uboot.fip; do
             ls out/*"$f" >/dev/null 2>&1 || { echo "::error::缺少引导工件 $f"; ls out; exit 1; }
           done
+          # 生成校验和，供刷机前核对 itb 完整性（rootfs Bad Data Hash 多为刷写不完整）
+          (cd out && sha256sum ./* > sha256sums.txt)
           DU=$(du -sh out | cut -f1)
           echo "size=$DU" >> "$GITHUB_OUTPUT"
 
@@ -232,18 +234,39 @@ jobs:
             Kwrt PHILIPS HY3000 (MT7981B + eMMC) 自动编译
 
             - 源码: openwrt/openwrt \`openwrt-25.12\` + Kwrt devices/common 定制
-            - 引导: rax3000m 同款 FIT(itb) 四件套，U-Boot 网页刷机兼容
+            - 引导: rax3000m 同款 FIT(itb) 四件套（U-Boot 2025.10，GPT production@64M / 1004M）
             - WiFi: 双频默认开启（factory 校准数据 + uci-defaults 强制启用），无射频锁死
             - 默认 IP: 10.0.0.1 / 用户名 root / 无密码
             - 工作流: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-            ### 刷机四件套（U-Boot 网页刷机）
-            1. \`preloader.bin\` → 刷入 **preloader** 位置（BL2，写 eMMC boot0 硬件分区）
-            2. \`bl31-uboot.fip\` → 刷入 **fip** 位置（ATF + U-Boot）
-            3. \`gpt.bin\` → 刷入 **GPT** 位置（分区表）
-            4. \`sysupgrade.itb\` → 刷入 **firmware** 位置（系统主体）
-            5. （可选）\`*-initramfs-recovery.itb\` 为救援镜像，变砖时用 TFTP 引导恢复
+            ### ⚠️ 刷机前必读
 
-            ⚠️ 四件必须配套使用，不要混用其他来源的 preloader/fip，否则可能变砖且无法恢复。
+            HY3000 出厂 U-Boot（2023.07）的 firmware 分区装不下 Kwrt 固件（itb > 54MB），
+            **只刷 sysupgrade.itb 会被截断**，开机日志出现
+            `rootfs-1 ... Bad Data Hash / crc32 error` 并进入 Web failsafe。
+            遇到该现象 = 引导未更新 / 刷写不完整，请严格按下面步骤完整刷入。
+
+            ### 首次刷机（串口 U-Boot 菜单，PC 网线接设备）
+
+            1. 选 `0. U-Boot console`，执行 \`mmc erase 0x2000 0x800\`（清除旧环境变量，关键！）
+            2. 回菜单选 \`Upgrade ATF BL2\`，上传 \`preloader.bin\`（写 eMMC boot0 硬件分区）
+            3. 选 \`Upgrade ATF FIP\`，上传 \`bl31-uboot.fip\`
+            4. 选 \`Upgrade partition table\`，上传 \`gpt.bin\`
+            5. ⚠️ 此后**严禁**再用旧菜单 \`Upgrade firmware\`（会覆盖新 FIP 导致变砖）
+            6. 断电重启 → 新 U-Boot（2025.10）首次启动自动初始化环境，菜单变为 \`OpenWrt [eMMC]\`
+            7. PC 设静态 IP \`192.168.1.254\`，开 TFTP 服务（目录放 \`sysupgrade.itb\`）
+            8. 新菜单选 \`4. Load production system via TFTP then write to eMMC\` 刷入系统
+               （或先选 \`1.\` TFTP 引导 \`*-initramfs-recovery.itb\` 进系统，再用 LuCI 上传 sysupgrade.itb）
+            9. 重启完成
+
+            ### 日常升级
+
+            已刷好本引导链的机器：LuCI → 系统 → 备份/升级，直接上传 \`sysupgrade.itb\`。
+
+            ### 附件说明
+
+            - \`sha256sums.txt\`: 校验和，刷机前务必核对 itb 完整性
+            - \`*-initramfs-recovery.itb\`: 救援镜像（U-Boot TFTP 引导，变砖恢复用）
+            - 四件必须配套使用，不要混用其他来源的 preloader/fip
           files: out/*
           fail_on_unmatched_files: false

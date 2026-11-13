@@ -258,7 +258,7 @@
 
 --- /dev/null
 +++ b/defenvs/philips_hy3000_env
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,59 @@
 +ipaddr=192.168.1.1
 +serverip=192.168.1.254
 +loadaddr=0x46000000
@@ -270,7 +270,7 @@
 +bootfile=openwrt-mediatek-filogic-philips_hy3000-initramfs-recovery.itb
 +bootfile_bl2=openwrt-mediatek-filogic-philips_hy3000-preloader.bin
 +bootfile_fip=openwrt-mediatek-filogic-philips_hy3000-bl31-uboot.fip
-+bootfile_upg=openwrt-mediatek-filogic-philips_hy3000-squashfs-sysupgrade.itb
++bootfile_upg=openwrt-mediatek-filogic-philips_hy3000-sysupgrade.itb
 +bootfile_gpt=openwrt-mediatek-filogic-philips_hy3000-gpt.bin
 +bootled_pwr=red:status
 +bootled_rec=green:status
@@ -312,6 +312,10 @@
 +emmc_write_bl2=mmc partconf 0 1 1 1 && mmc erase 0x0 0x400 && mmc write $fileaddr 0x0 0x400 ; mmc partconf 0 1 1 0
 +emmc_write_fip=mmc erase 0x3400 0x2000 && mmc write $fileaddr 0x3400 0x2000 && mmc erase 0x2000 0x800
 +emmc_write_gpt=mmc write $fileaddr 0x0 0x22
++_init_env=setenv _init_env ; setenv _create_env ; saveenv ; saveenv
++_firstboot=setenv _firstboot ; run _switch_to_menu ; run _init_env ; run boot_first
++_switch_to_menu=setenv _switch_to_menu ; setenv bootdelay 3 ; setenv bootmenu_delay 3 ; setenv bootmenu_0 $bootmenu_0d ; setenv bootmenu_0d ; run _bootmenu_update_title
++_bootmenu_update_title=setenv _bootmenu_update_title ; setenv bootmenu_title "$bootmenu_title [33m$ver[0m"
 +emmc_write_production=part start mmc 0 $part_default part_addr && part size mmc 0 $part_default part_size && run mmc_write_vol
 +emmc_write_recovery=part start mmc 0 $part_recovery part_addr && part size mmc 0 $part_recovery part_size && run mmc_write_vol
 
