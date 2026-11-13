@@ -134,6 +134,15 @@ jobs:
         run: |
           cd openwrt
           make defconfig
+          # 排除小闪存机型：Kwrt 全量 rootfs（内核+squashfs 约 54MB）装不进
+          # IMAGE_SIZE < 60MB 的 NOR 机型，check-size 必失败（2026-11-13/14 连续失败实证：
+          # cudy_re3000/wr3000 15M、iptime_ax3000q/se/sm/m 与 ax7800m-6e、netgear_wax220、
+          # tplink/mercusys/zyxel/dlink 32~50M 等，共 28 款，从上游 filogic.mk 枚举）。
+          # 这些机型与 Kwrt 固件体积不兼容，如需支持需单独裁剪包列表，勿直接恢复。
+          SMALL_DEVICES="totolink_x6000r wavlink_wl-wn573hx3 yuncore_ax835 widelantech_wap430x kebidumei_ax3000-u22 cudy_re3000-v1 cudy_wr3000-v1 wavlink_wl-wn586x3 buffalo_wsr-6000ax8 gatonetworks_gdsp iptime_ax3000q iptime_ax3000se iptime_ax3000sm iptime_ax3000m iptime_ax7800m-6e netgear_wax220 tplink_fr365-v1 tplink_eap683-lr tenbay_wr3000k dlink_aquila-pro-ai-e30-a1 dlink_aquila-pro-ai-m30-a1 dlink_aquila-pro-ai-m60-a1 mercusys_mr90x-v1 tplink_archer-ax80-v1 tplink_archer-ax80-v1-eu tplink_be450 tplink_re6000xd zyxel_nwa50ax-pro"
+          for d in $SMALL_DEVICES; do
+            echo "# CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_$(echo "$d" | tr 'a-z-' 'A-Z_') is not set" >> .config
+          done
           # 与 Kwrt 官方一致：无线驱动全部置 n（固件体积/兼容考虑）
           sed -n '/# Wireless Drivers/,/# end of Wireless Drivers/p' .config | sed -e 's/=m/=n/' >> .config
           sed -i "s/\(kmod-qca.*\)=m/\1=n/" .config

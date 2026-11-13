@@ -15,6 +15,10 @@ sed -i "s?git.openwrt.org/\(project\|feed\)?github.com/openwrt?g" feeds.conf.def
 ./scripts/feeds install -a -p kiddin9 -f
 ./scripts/feeds install -a
 
+# kiddin9 feed 的 dufs 包 Makefile 偶发损坏（metadata 报 ERROR: please fix feeds/kiddin9/dufs），
+# 该包未被任何机型选用，直接剔除以消除随机构建失败
+rm -rf feeds/kiddin9/dufs
+
 sed --follow-symlinks -i "s#%C\"#%C by Kiddin'\"#" package/base-files/files/etc/os-release
 sed -i -e '$a /etc/bench.log' \
         -e '/\/etc\/profile/d' \
