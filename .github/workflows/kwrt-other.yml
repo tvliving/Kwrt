@@ -14,10 +14,6 @@ on:
         description: 编译完成后发布 Release
         type: boolean
         default: true
-      only:
-        description: '只构建指定配方（逗号分隔，如 bcm53xx,x86_64；留空=全部）'
-        type: string
-        default: ''
   schedule:
     # 每 8 天一次。GitHub cron 不支持真正的「每 N 天」，这里取每月 1/9/17/25 日 18:00 UTC
     # （次日 02:00 北京时间），相邻间隔 8/8/8 天，跨月因月份长度会短 1~2 天
@@ -37,8 +33,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 355
-    # 只构建 workflow_dispatch 的 only 参数里点名的配方（留空即全量）
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == '' || contains(format(',{0},', inputs.only), format(',{0},', matrix.dev)) }}
     env:
       TARGET: ${{ matrix.dev }}
       TGT: ${{ matrix.tgt }}
