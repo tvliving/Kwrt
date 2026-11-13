@@ -12,6 +12,11 @@ on:
         description: 编译完成后发布 Release
         type: boolean
         default: true
+  push:
+    branches: [25.12]
+    paths:
+      - '.github/workflows/kwrt-hy3000.yml'
+      - 'devices/mediatek_filogic_hy3000/**'
   schedule:
     # 每周一 09:00（北京时间，UTC+8 → UTC 01:00），与 kwrt-mt7981/mt7986 相同
     - cron: '0 1 * * 1'
