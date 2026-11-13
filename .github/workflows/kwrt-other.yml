@@ -219,7 +219,14 @@ jobs:
           echo "启用机型: $n（下限 $MIN_DEVICES）"
           grep -E "^CONFIG_TARGET_(DEVICE_)?${TGT}_${SUB}_DEVICE_.*=y$" .config | head -5 || true
           [ "$n" -ge "$MIN_DEVICES" ] || { echo "::error::机型数量不足，实际 $n"; exit 1; }
-          grep -q "^CONFIG_TARGET_${TGT}_${SUB}=y" .config || { echo "::error::target 未生效"; exit 1; }
+          grep -q "^CONFIG_TARGET_${TGT}_${SUB}=y" .config || {
+            echo "::error::target 未生效（诊断输出）"
+            echo "== .config 的 TARGET 行 =="; grep -n "CONFIG_TARGET_" .config | head -40 || true
+            echo "== generic 内核文件 =="; ls target/linux/generic/ | grep -i kernel || true
+            echo "== x86 Makefile 头部 =="; head -20 target/linux/x86/Makefile || true
+            echo "== targetinfo 中 x86 =="; grep -i "x86" tmp/.targetinfo 2>/dev/null | head -10 || true
+            exit 1
+          }
 
       - name: 编译固件
         run: |
