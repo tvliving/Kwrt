@@ -1,8 +1,10 @@
 # Kwrt（kiddin9/Kwrt）其余 target 固件构建
 # 用途：补齐仓库里已有 devices/<target> 配方、但还没有单独 workflow 的官方目标
 #   bcm27xx_bcm2709 / bcm27xx_bcm2710 / bcm27xx_bcm2711 / bcm27xx_bcm2712
-#   bcm53xx / ipq40xx_generic / ipq806x_generic / mediatek_filogic
-#   rockchip_armv8 / siflower_sf21 / x86_64
+#   bcm53xx / siflower_sf21 / x86_64
+# 注：ipq806x_generic / mediatek_filogic / rockchip_armv8 已拆成各自的 workflow
+#     （kwrt-ipq806x_generic / kwrt-mediatek_filogic / kwrt-rockchip_armv8），
+#     ipq40xx 按需求不再构建
 # 构建方式完全沿用 Kwrt 官方配方：openwrt/openwrt openwrt-25.12 源码
 # + devices/common 的 diy 定制 + 各自机型目录的 .config / diy.sh / patches
 name: 🛠️ Kwrt Other Targets Build
@@ -68,26 +70,6 @@ jobs:
             sub: generic
             name: BCM53XX (Generic)
             min_dev: 3
-          - dev: ipq40xx_generic
-            tgt: ipq40xx
-            sub: generic
-            name: IPQ40XX (Generic)
-            min_dev: 5
-          - dev: ipq806x_generic
-            tgt: ipq806x
-            sub: generic
-            name: IPQ806X (Generic)
-            min_dev: 3
-          - dev: mediatek_filogic
-            tgt: mediatek
-            sub: filogic
-            name: MediaTek Filogic (Generic)
-            min_dev: 15
-          - dev: rockchip_armv8
-            tgt: rockchip
-            sub: armv8
-            name: Rockchip ARMv8
-            min_dev: 5
           - dev: siflower_sf21
             tgt: siflower
             sub: sf21
