@@ -191,6 +191,23 @@ jobs:
           done
           grep -q '^CONFIG_TARGET_mediatek_filogic=y' .config || { echo "::error::target 未生效"; exit 1; }
 
+      - name: 预同步内核配置（防止 NEW 符号在编译阶段交互中断）
+        run: |
+          cd openwrt
+          # 本次构建选中的包把内核 RC_CORE 打开了，于是 linux-6.12 里多出一个带 prompt 的
+          # 新符号 IR_IMON_DECODER，编译阶段 `SYNC include/config/auto.conf` 会重启 kconfig
+          # 交互，而 runner 的 stdin 是 EOF → syncconfig Error 1，target/linux 直接失败。
+          # 这里先用默认值把内核 kconfig 的提问全部答完（tools/toolchain 顺带在这步预热，
+          # 后面的编译步骤直接复用，不会重复耗时）。
+          ( yes "" 2>/dev/null || true ) | make -j1 kernel_oldconfig V=s 2>&1 | tail -50
+          rc=${PIPESTATUS[1]}
+          [ "$rc" -eq 0 ] || { echo "::error::内核 oldconfig 失败 (rc=$rc)"; exit 1; }
+          KC=$(ls build_dir/target-*/linux-*/linux-*/.config 2>/dev/null | head -1)
+          [ -n "$KC" ] && [ -f "$KC" ] || { echo "::error::内核 .config 未生成"; exit 1; }
+          echo ">>> 内核配置：$KC"
+          grep -E 'RC_DECODERS|IR_IMON' "$KC" || true
+          echo "✔ 内核 kconfig 已同步"
+
       - name: 编译固件
         run: |
           set -o pipefail
