@@ -178,6 +178,15 @@ jobs:
           grep -qE '^CONFIG_PACKAGE_kmod-mt7915e=y$' .config \
             || { echo "::error::kmod-mt7915e 未启用，开机将没有 WiFi"; exit 1; }
 
+          # 诊断：luci-app-store 的 kconfig 定义与依赖（依赖不满足时会被静默丢弃）
+          echo "===== 诊断 luci-app-store ====="
+          grep -n -A14 '^config PACKAGE_luci-app-store$' tmp/.config-package.in || echo "tmp/.config-package.in 里没有该符号"
+          echo "---- Makefile 来源 ----"
+          ls -d package/luci-app-store package/feeds/*/luci-app-store 2>/dev/null || true
+          grep -n "LUCI_DEPENDS\|LUCI_EXTRA_DEPENDS" package/luci-app-store/Makefile 2>/dev/null || true
+          echo "---- .config 中的行 ----"
+          grep -n "luci-app-store\|luci-lib-taskd\|PACKAGE_taskd" .config || true
+
           # iStore / 中文语言包断言：这两个包都曾因 kconfig 依赖不满足被静默剔除，
           # 构建全绿但产物里没有，必须在这里卡住
           for s in luci-app-store luci-app-quickstart luci-i18n-base-zh-cn; do
