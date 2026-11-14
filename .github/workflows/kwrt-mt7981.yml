@@ -142,6 +142,11 @@ jobs:
       - name: defconfig 并校验机型
         run: |
           cd openwrt
+          # 树内新增的包（iStore）必须强制重扫 package 元数据：
+          # scan 结果缓存在 tmp/.packageinfo，不删会漏掉刚 vendor 进去的包，
+          # 表现为 tmp/.config-package.in 里没有 PACKAGE_luci-app-store，
+          # .config 写 =y 也会被静默丢弃
+          rm -f tmp/.packageinfo tmp/.config-package.in
           make defconfig
           # 排除小闪存机型：Kwrt 全量 rootfs（内核+squashfs 约 54MB）装不进
           # IMAGE_SIZE < 60MB 的 NOR 机型，check-size 必失败（2026-11-13/14 连续失败实证：
