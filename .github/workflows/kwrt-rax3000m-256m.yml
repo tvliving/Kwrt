@@ -191,29 +191,50 @@ jobs:
           done
           grep -q '^CONFIG_TARGET_mediatek_filogic=y' .config || { echo "::error::target 未生效"; exit 1; }
 
-      - name: 预同步内核配置（防止 NEW 符号在编译阶段交互中断）
+      - name: 补齐内核 config 缺失符号（避免编译阶段交互中断）
         run: |
           cd openwrt
-          # 本次构建选中的包把内核 RC_CORE 打开了，于是 linux-6.12 里多出一个带 prompt 的
-          # 新符号 IR_IMON_DECODER，编译阶段 `SYNC include/config/auto.conf` 会重启 kconfig
-          # 交互，而 runner 的 stdin 是 EOF → syncconfig Error 1，target/linux 直接失败。
-          # 这里先用默认值把内核 kconfig 的提问全部答完（tools/toolchain 顺带在这步预热，
-          # 后面的编译步骤直接复用，不会重复耗时）。
-          ( yes "" 2>/dev/null || true ) | make -j1 kernel_oldconfig V=s 2>&1 | tail -50
-          rc=${PIPESTATUS[1]}
-          [ "$rc" -eq 0 ] || { echo "::error::内核 oldconfig 失败 (rc=$rc)"; exit 1; }
-          KC=$(ls build_dir/target-*/linux-*/linux-*/.config 2>/dev/null | head -1)
-          [ -n "$KC" ] && [ -f "$KC" ] || { echo "::error::内核 .config 未生成"; exit 1; }
-          echo ">>> 内核配置：$KC"
-          grep -E 'RC_DECODERS|IR_IMON' "$KC" || true
-          echo "✔ 内核 kconfig 已同步"
+          # 本次选中的包把内核 RC_CORE 打开了，linux-6.12 里于是多出一个带 prompt 的
+          # 新符号 IR_IMON_DECODER。它没写进 target 的 config-6.12，编译阶段
+          # `SYNC include/config/auto.conf` 会重启 kconfig 交互；runner 的 stdin 是 EOF
+          # → syncconfig Error 1，target/linux 直接失败（上个 run 就死在这里）。
+          #
+          # 修法：直接在内核 config 片段里把这个符号的取值钉死，kconfig 就不再提问。
+          # 不用 `make kernel_oldconfig`——它依赖 prepare_kernel_conf → toolchain/install，
+          # 会先做完整工具链（2 核 runner 上一小时起），纯属白烧。
+          python3 - <<'PYEOF'
+          import glob, io, os, re
+          SYMS = {'CONFIG_IR_IMON_DECODER': 'n'}
+          files = [f for f in sorted(glob.glob('target/linux/mediatek/filogic/config-*'))
+                   if os.path.isfile(f)]
+          assert files, '找不到内核 config 片段'
+          for f in files:
+              s = io.open(f, encoding='utf-8').read()
+              added = []
+              for k, v in SYMS.items():
+                  if re.search(r'^(%s=|# %s is not set)$' % (k, k), s, re.M):
+                      continue
+                  if v == 'n':
+                      s = s.rstrip('\n') + '\n# %s is not set\n' % k
+                  else:
+                      s = s.rstrip('\n') + '\n%s=%s\n' % (k, v)
+                  added.append(k)
+              if added:
+                  io.open(f, 'w', encoding='utf-8').write(s)
+              print('%s: %s' % (f, ('补入 ' + ','.join(added)) if added else '已有取值，跳过'))
+          PYEOF
+          for f in target/linux/mediatek/filogic/config-*; do
+            grep -qE '^(CONFIG_IR_IMON_DECODER=|# CONFIG_IR_IMON_DECODER is not set)' "$f" \
+              || { echo "::error::$f 未写入 IR_IMON_DECODER"; exit 1; }
+          done
+          echo "✔ 内核 config 已补齐，编译阶段不会再有 NEW 符号交互"
 
       - name: 编译固件
         run: |
           set -o pipefail
           cd openwrt
           df -hT
-          if ! make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log; then
+          if ! make -j"$(( $(nproc) + 1 ))" </dev/null 2>&1 | tee build.log; then
             echo "::warning::并行编译失败，取错误日志"
             grep -nE 'Error [0-9]+|error:|No rule to make target|failed to build' build.log | tail -40 || true
             pkgs=$(grep -oE '[A-Za-z0-9_./-]+ failed to build' build.log | awk '{print $1}' | sort -u || true)
