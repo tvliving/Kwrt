@@ -163,6 +163,11 @@ jobs:
           # 简体中文语言包：全量枚举选入（kconfig 只会保留对应 app 已选中的那些）
           awk '/^config PACKAGE_luci-i18n-.+-zh-cn$/{print $2"=y"}' tmp/.config-package.in >> .config
           echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" >> .config
+          # iStore 的守卫依赖：tar 被带入后 TAR_XZ 默认=y，xz-utils 不装 store 会被压没
+          echo "CONFIG_PACKAGE_xz-utils=y" >> .config
+          echo "CONFIG_PACKAGE_luci-lib-taskd=y" >> .config
+          echo "CONFIG_PACKAGE_taskd=y" >> .config
+          echo "CONFIG_PACKAGE_luci-lua-runtime=y" >> .config
           make defconfig
           grep -qE '^CONFIG_PACKAGE_luci-i18n-base-zh-cn=y$' .config \
             || { echo "::error::简体中文语言包未生效"; exit 1; }
