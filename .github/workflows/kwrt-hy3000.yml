@@ -145,6 +145,14 @@ jobs:
           find "devices/$TARGET/patches" -maxdepth 1 -type f -name '*.patch' ! -name '*.revert.patch' ! -name '*.bin.patch' ! -name '*.uboot.patch' -print0 2>/dev/null \
             | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' --no-backup-if-mismatch -p1 -F 1 -i '%'" || true
 
+      - name: 启用中文语言包 + 树内 vendor iStore（≥128M 闪存）
+        run: |
+          cd openwrt
+          # hy3000 是 8GB eMMC，闪存远大于 128M，可以整套装：
+          #   · 打开 luci-i18n-*-zh-cn 生成（否则界面只有英文、iStore 首页被静默剔除）
+          #   · 树内 vendor iStore（feed 里的 luci-app-store 会被 kconfig 静默丢弃）
+          bash devices/common/istore-zh.sh
+
       - name: defconfig 并校验机型
         run: |
           cd openwrt
@@ -153,16 +161,32 @@ jobs:
           # 否则 hy3000 的 kmod-mt7915e 会被关掉，开机没有 WiFi。
           # 这里显式确保 MT7981 的 mt76 驱动与固件选上（DEVICE_PACKAGES 已声明，双保险）
           sed -i "s/\(kmod-qca.*\)=m/\1=n/" .config
+          # 全量简体中文语言包：把这次构建里所有存在的 luci-i18n-*-zh-cn 包显式选入
+          # （依赖 LUCI_LANG 的 DEFAULT 机制容易随上游变动失效，这里改成直接枚举）
+          awk '/^config PACKAGE_luci-i18n-.+-zh-cn$/{print $2"=y"}' tmp/.config-package.in >> .config
           {
             echo "CONFIG_PACKAGE_kmod-mt7915e=y"
             echo "CONFIG_PACKAGE_kmod-mt7981-firmware=y"
             echo "CONFIG_PACKAGE_mt7981-wo-firmware=y"
             echo "CONFIG_PACKAGE_wpad-openssl=y"
             echo "CONFIG_PACKAGE_wireless-regdb=y"
+            echo "CONFIG_PACKAGE_luci-app-store=y"
+            echo "CONFIG_PACKAGE_luci-app-quickstart=y"
+            echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y"
           } >> .config
           make defconfig
           grep -qE '^CONFIG_PACKAGE_kmod-mt7915e=y$' .config \
             || { echo "::error::kmod-mt7915e 未启用，开机将没有 WiFi"; exit 1; }
+
+          # iStore / 中文语言包断言：这两个包都曾因 kconfig 依赖不满足被静默剔除，
+          # 构建全绿但产物里没有，必须在这里卡住
+          for s in luci-app-store luci-app-quickstart luci-i18n-base-zh-cn; do
+            grep -qE "^CONFIG_PACKAGE_${s}=y$" .config \
+              || { echo "::error::${s} 未生效（iStore 或中文包会缺失）"; exit 1; }
+          done
+          n=$(grep -cE '^CONFIG_PACKAGE_luci-i18n-.+-zh-cn=y$' .config || true)
+          [ "$n" -ge 5 ] || { echo "::error::简体中文语言包数量异常：$n"; exit 1; }
+          echo "✔ iStore 已选入，简体中文语言包 $n 个"
 
           echo "===== 启用的机型 ====="
           grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config
