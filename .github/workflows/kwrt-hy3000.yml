@@ -1,8 +1,12 @@
 # Kwrt PHILIPS HY3000 (MT7981B + eMMC) 固件构建
-# 方案移植自 tvliving/istoreos istoreos-25.12 分支已验证的 FIT(itb) 四件套方案：
-#   preloader.bin（BL2，写 eMMC boot0 硬件分区）+ bl31-uboot.fip（写用户区 0x3400 扇区）
-#   + gpt.bin（写扇区 0）+ sysupgrade.itb（FIT external-static-with-rootfs，root=/dev/fit0）
-# WiFi 修复：DTS 使用 factory 校准数据 + uci-defaults 默认开启双频 radio
+#
+# 机型方案与 tvliving/lede master 的 philips_hy3000 保持一致（lede 版实测可正常开机）：
+#   内核单独一个 FIT 分区 + rootfs 独立分区 + sysupgrade-tar 升级包，
+#   DTS 用 root=PARTLABEL=rootfs 由内核自己找根分区。
+#   不使用 preloader/fip/gpt 四件套，沿用机器现有 U-Boot，产物为 sysupgrade.bin。
+#
+# WiFi：DTS 接 factory 分区 eeprom 校准数据 + kmod-mt7915e（mt76），
+#       注意不能沿用全机型构建「Wireless Drivers 全置 n」的逻辑。
 name: 🛠️ Kwrt PHILIPS HY3000 (MT7981 eMMC) Build
 
 on:
@@ -130,27 +134,8 @@ jobs:
           cd openwrt
           cp -rn devices/common/patches "devices/$TARGET/" 2>/dev/null || true
 
-          # ── U-Boot 源码补丁单独路由 ───────────────────────────────────────────
-          # *.uboot.patch 里的路径（configs/ 、arch/arm/dts/ 、defenvs/）都是 u-boot
-          # 源码树内的相对路径，必须交给 uboot-mediatek 包在解压后的 u-boot 源码里打。
-          # 若在 openwrt 根目录直接 patch，文件会被写到 openwrt/configs/ 等错误位置，
-          # uboot 变体 mt7981_philips_hy3000 就找不到 defconfig，编译直接失败。
-          UBP=package/boot/uboot-mediatek/patches
-          mkdir -p "$UBP"
-          shopt -s nullglob
-          for f in "devices/$TARGET"/patches/*.uboot.patch; do
-            dst="$UBP/$(basename "$f" .uboot.patch).patch"
-            cp -f "$f" "$dst"
-            echo ">>> U-Boot 补丁就位: $dst"
-            for need in configs/mt7981_philips_hy3000_defconfig \
-                        arch/arm/dts/mt7981-philips-hy3000.dts \
-                        defenvs/philips_hy3000_env; do
-              grep -qF "+++ b/$need" "$dst" || { echo "::error::$dst 缺少 $need"; exit 1; }
-            done
-          done
-          shopt -u nullglob
-          grep -q '^define U-Boot/mt7981_philips_hy3000' package/boot/uboot-mediatek/Makefile \
-            || { echo "::error::uboot-mediatek Makefile 未注册 mt7981_philips_hy3000 变体"; exit 1; }
+          # 不再打 U-Boot 源码补丁：HY3000 沿用原厂 U-Boot，不编译/不替换引导，
+          # 机型支持全部由 diy.sh 注入到 filogic.mk / platform.sh / 02_network。
 
           if [ -n "$(ls -A "devices/$TARGET"/*.bin.patch 2>/dev/null)" ]; then
             git apply "devices/$TARGET"/patches/*.bin.patch || true
@@ -164,10 +149,20 @@ jobs:
         run: |
           cd openwrt
           make defconfig
-          # 与 Kwrt 官方一致：无线驱动全部置 n（固件体积/兼容考虑）
-          sed -n '/# Wireless Drivers/,/# end of Wireless Drivers/p' .config | sed -e 's/=m/=n/' >> .config
+          # 注意：不能沿用全机型构建「Wireless Drivers 全置 n」的做法，
+          # 否则 hy3000 的 kmod-mt7915e 会被关掉，开机没有 WiFi。
+          # 这里显式确保 MT7981 的 mt76 驱动与固件选上（DEVICE_PACKAGES 已声明，双保险）
           sed -i "s/\(kmod-qca.*\)=m/\1=n/" .config
+          {
+            echo "CONFIG_PACKAGE_kmod-mt7915e=y"
+            echo "CONFIG_PACKAGE_kmod-mt7981-firmware=y"
+            echo "CONFIG_PACKAGE_mt7981-wo-firmware=y"
+            echo "CONFIG_PACKAGE_wpad-openssl=y"
+            echo "CONFIG_PACKAGE_wireless-regdb=y"
+          } >> .config
           make defconfig
+          grep -qE '^CONFIG_PACKAGE_kmod-mt7915e=y$' .config \
+            || { echo "::error::kmod-mt7915e 未启用，开机将没有 WiFi"; exit 1; }
 
           echo "===== 启用的机型 ====="
           grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config
@@ -213,11 +208,10 @@ jobs:
           mkdir -p out
           cp -f openwrt/bin/targets/mediatek/filogic/*philips*hy3000* out/ 2>/dev/null || true
           ls -lh out || true
-          # 四件套缺一不可
-          for f in sysupgrade.itb gpt.bin preloader.bin bl31-uboot.fip; do
-            ls out/*"$f" >/dev/null 2>&1 || { echo "::error::缺少引导工件 $f"; ls out; exit 1; }
-          done
-          # 生成校验和，供刷机前核对 itb 完整性（rootfs Bad Data Hash 多为刷写不完整）
+          # sysupgrade.bin 是刷机主件（内核 FIT + rootfs 分区镜像打包成 tar），
+          # initramfs-kernel.bin 用于救援 / TFTP 首次引导
+          ls out/*sysupgrade.bin >/dev/null 2>&1 \
+            || { echo "::error::缺少 sysupgrade.bin"; ls out; exit 1; }
           (cd out && sha256sum ./* > sha256sums.txt)
           DU=$(du -sh out | cut -f1)
           echo "size=$DU" >> "$GITHUB_OUTPUT"
@@ -238,40 +232,29 @@ jobs:
           body: |
             Kwrt PHILIPS HY3000 (MT7981B + eMMC) 自动编译
 
-            - 源码: openwrt/openwrt \`openwrt-25.12\` + Kwrt devices/common 定制
-            - 引导: rax3000m 同款 FIT(itb) 四件套（U-Boot 2025.10，GPT production@64M / 1004M）
-            - WiFi: 双频默认开启（factory 校准数据 + uci-defaults 强制启用），无射频锁死
+            - 源码: openwrt/openwrt `openwrt-25.12` + Kwrt devices/common 定制
+            - 机型方案: 与 tvliving/lede 的 philips_hy3000 完全一致
+              （内核 FIT 独立分区 + rootfs 独立分区 + sysupgrade-tar，`root=PARTLABEL=rootfs`）
+            - 引导: **沿用机器现有 U-Boot，不刷 preloader / fip / gpt**
+            - WiFi: mt76（kmod-mt7915e）+ 2.4G/5G 双频默认开启
             - 默认 IP: 10.0.0.1 / 用户名 root / 无密码
             - 工作流: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-            ### ⚠️ 刷机前必读
+            ### 刷机（与 lede 版 HY3000 同一套 sysupgrade 包）
 
-            HY3000 出厂 U-Boot（2023.07）的 firmware 分区装不下 Kwrt 固件（itb > 54MB），
-            **只刷 sysupgrade.itb 会被截断**，开机日志出现
-            `rootfs-1 ... Bad Data Hash / crc32 error` 并进入 Web failsafe。
-            遇到该现象 = 引导未更新 / 刷写不完整，请严格按下面步骤完整刷入。
+            内核与 rootfs 分开写进各自分区，不受单个分区容量限制，
+            不会再出现 `rootfs Bad Data Hash` 掉 Web failsafe 的问题。
 
-            ### 首次刷机（串口 U-Boot 菜单，PC 网线接设备）
-
-            1. 选 `0. U-Boot console`，执行 \`mmc erase 0x2000 0x800\`（清除旧环境变量，关键！）
-            2. 回菜单选 \`Upgrade ATF BL2\`，上传 \`preloader.bin\`（写 eMMC boot0 硬件分区）
-            3. 选 \`Upgrade ATF FIP\`，上传 \`bl31-uboot.fip\`
-            4. 选 \`Upgrade partition table\`，上传 \`gpt.bin\`
-            5. ⚠️ 此后**严禁**再用旧菜单 \`Upgrade firmware\`（会覆盖新 FIP 导致变砖）
-            6. 断电重启 → 新 U-Boot（2025.10）首次启动自动初始化环境，菜单变为 \`OpenWrt [eMMC]\`
-            7. PC 设静态 IP \`192.168.1.254\`，开 TFTP 服务（目录放 \`sysupgrade.itb\`）
-            8. 新菜单选 \`4. Load production system via TFTP then write to eMMC\` 刷入系统
-               （或先选 \`1.\` TFTP 引导 \`*-initramfs-recovery.itb\` 进系统，再用 LuCI 上传 sysupgrade.itb）
-            9. 重启完成
-
-            ### 日常升级
-
-            已刷好本引导链的机器：LuCI → 系统 → 备份/升级，直接上传 \`sysupgrade.itb\`。
+            1. **已有系统（lede / Kwrt / OpenWrt）**：LuCI → 系统 → 备份/升级 →
+               上传 `*-sysupgrade.bin`。跨发行版升级建议**不勾选**"保留配置"。
+            2. **原厂固件 / 变砖**：先用 `*-initramfs-kernel.bin` 通过 TFTP 引导进内存系统，
+               再在 LuCI 里上传 `*-sysupgrade.bin` 正式写入。
+            3. **命令行**：`sysupgrade -n /tmp/xxx-sysupgrade.bin`
 
             ### 附件说明
 
-            - \`sha256sums.txt\`: 校验和，刷机前务必核对 itb 完整性
-            - \`*-initramfs-recovery.itb\`: 救援镜像（U-Boot TFTP 引导，变砖恢复用）
-            - 四件必须配套使用，不要混用其他来源的 preloader/fip
+            - `*-sysupgrade.bin`: 升级包（tar：内核 FIT + rootfs squashfs）
+            - `*-initramfs-kernel.bin`: 内存系统，救援 / 首次引导用
+            - `sha256sums.txt`: 校验和，刷机前核对
           files: out/*
           fail_on_unmatched_files: false
