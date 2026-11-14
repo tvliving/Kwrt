@@ -69,6 +69,19 @@ jobs:
             llvm python3-pyelftools libpython3-dev aria2 jq qemu-utils ccache rename \
             libelf-dev device-tree-compiler libgmp3-dev libmpc-dev libfuse-dev
           sudo timedatectl set-timezone "Asia/Shanghai"
+          # libnftnl 1.3.1 的 autoreconf 会调 automake-1.17，而 Ubuntu 只带 1.16.5，
+          # 于是 build-aux/missing 直接 `automake-1.17: command not found`（Error 127）。
+          # 这里现编一个 1.17 装到 /usr/local，版本化命令名 automake-1.17 会被 missing 优先命中。
+          if ! command -v automake-1.17 >/dev/null 2>&1; then
+            ( cd /tmp \
+              && curl -fsSL -o automake.tar.xz https://mirrors.kernel.org/gnu/automake/automake-1.17.tar.xz \
+              && tar xf automake.tar.xz \
+              && cd automake-1.17 \
+              && ./configure --prefix=/usr/local -q \
+              && make -j"$(nproc)" -s \
+              && sudo make install -s )
+          fi
+          automake-1.17 --version | head -1
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
 
