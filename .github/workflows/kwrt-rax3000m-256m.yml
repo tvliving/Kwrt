@@ -127,7 +127,7 @@ jobs:
           chmod +x devices/common/diy.sh
           /bin/bash devices/common/diy.sh
 
-      - name: 注入 RAX3000M / XR30 256M 机型（dts + overlay + filogic.mk）
+      - name: 注入 RAX3000M / XR30 256M 机型（完整版 dts + filogic.mk + platform.sh 路由）
         run: |
           cd openwrt
           cp -f devices/common/.config .config
@@ -310,11 +310,13 @@ jobs:
           cp -f "$B"/*cmcc_rax3000m_nand* out/ 2>/dev/null || true
           cp -f "$B"/*cmcc_xr30_nand* out/ 2>/dev/null || true
           ls -lh out || true
-          ls out/*sysupgrade.itb >/dev/null 2>&1 \
-            || { echo "::error::缺少 sysupgrade.itb"; exit 1; }
           for d in cmcc_rax3000m_nand cmcc_xr30_nand; do
-            ls out/*"$d"*sysupgrade.itb >/dev/null 2>&1 \
-              || { echo "::error::$d 没有产出 sysupgrade.itb"; exit 1; }
+            ls out/*"$d"*squashfs-sysupgrade.bin >/dev/null 2>&1 \
+              || { echo "::error::$d 没有产出 sysupgrade.bin（tar 升级包）"; exit 1; }
+            ls out/*"$d"*squashfs-factory.bin >/dev/null 2>&1 \
+              || { echo "::error::$d 没有产出 factory.bin（UBI 全量镜像）"; exit 1; }
+            ls out/*"$d"*initramfs-recovery.itb >/dev/null 2>&1 \
+              || { echo "::error::$d 没有产出 initramfs-recovery.itb（U-Boot Web 救援）"; exit 1; }
           done
           (cd out && sha256sum ./* > sha256sums.txt)
           DU=$(du -sh out | cut -f1)
@@ -338,27 +340,23 @@ jobs:
 
             - 源码: openwrt/openwrt `openwrt-25.12` + Kwrt devices/common 定制
             - 分区: ubi 由 114MB 扩到 **250.5MB**（`0x580000 + 0xFA80000`），其余沿用上游
-            - 启动: 沿用 `KERNEL_IN_UBI` + FIT(kernel+rootfs) + `/dev/fit0`，**不刷 preloader/fip**
+            - 启动: 经典 NAND UBI 卷方案（kernel FIT 卷 + rootfs squashfs 静态卷），
+              **兼容原厂/社区老 U-Boot**，不刷 preloader/fip，与 lede 同款方案
             - WiFi: mt76（kmod-mt7915e）+ factory eeprom nvmem 校准，2.4G/5G 双频
             - 首页/iStore: luci-app-quickstart 首页 + luci-app-store 软件中心 + 全量简体中文包
             - 默认 IP: 10.0.0.1 / 用户名 root / 无密码
             - 工作流: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-            ### ⚠️ 刷机前必须确认
+            ### 刷机流程（老 U-Boot）
 
-            1. 机器必须是 **硬改 256M Flash**，且 U-Boot 是支持 256M 布局的大分区版
-               （如 1715173329 的 RAX3000M U-Boot，支持 stock/expand 切换）。
-               **128M 的 U-Boot 刷本固件会启动失败**；BL2/FIP 也要与 256M 匹配，不能混用。
-            2. 刷机流程：
-               ① U-Boot Web（192.168.1.1）上传 `*-initramfs-recovery.itb` → Update
-               ② 重启进临时系统
-               ③ LuCI → 系统 → 备份/升级 → 上传 `*-sysupgrade.itb`（跨发行版建议不保留配置）
-            3. 刷完验证：`cat /proc/mtd`（看 ubi 是否约 250M）、`df -h | grep overlay`
+            1. U-Boot Web（192.168.1.1）上传 `*-initramfs-recovery.itb` → Update，进临时系统
+            2. LuCI → 系统 → 备份/升级 → 上传 `*-squashfs-sysupgrade.bin`（跨发行版建议不保留配置）
+            3. 也可在临时系统命令行用 `sysupgrade -n *squashfs-sysupgrade.bin`
 
             ### 附件说明
 
-            - `*cmcc_rax3000m_nand-squashfs-sysupgrade.itb`: RAX3000M 256M 正式固件
-            - `*cmcc_xr30_nand-squashfs-sysupgrade.itb`: XR30 256M 正式固件
+            - `*-squashfs-sysupgrade.bin`: 正式固件（tar：kernel + root.ubi），系统内升级用
+            - `*-squashfs-factory.bin`: 全量 UBI 镜像（kernel + rootfs 卷），供 U-Boot 直接写入 ubi 分区
             - `*-initramfs-recovery.itb`: 过渡/救援系统（U-Boot Web 先刷这个）
             - `sha256sums.txt`: 校验和
 
