@@ -191,20 +191,31 @@ jobs:
           done
           grep -q '^CONFIG_TARGET_mediatek_filogic=y' .config || { echo "::error::target 未生效"; exit 1; }
 
-      - name: 补齐内核 config 缺失符号（避免编译阶段交互中断）
+      - name: 钉死内核可交互的新符号（避免 syncconfig 中断）
         run: |
           cd openwrt
-          # 本次选中的包把内核 RC_CORE 打开了，linux-6.12 里于是多出一个带 prompt 的
-          # 新符号 IR_IMON_DECODER。它没写进 target 的 config-6.12，编译阶段
-          # `SYNC include/config/auto.conf` 会重启 kconfig 交互；runner 的 stdin 是 EOF
-          # → syncconfig Error 1，target/linux 直接失败（上个 run 就死在这里）。
+          # 本次选中的包把内核 RC_CORE 打开了，linux-6.12 的 drivers/media/rc/Kconfig 里
+          # 于是冒出一堆带 prompt 的新符号。它们没写进 target 的 config-6.12，编译阶段
+          # `SYNC include/config/auto.conf` 就会重启 kconfig 交互；runner 的 stdin 是 EOF
+          # → syncconfig Error 1，target/linux 直接失败。
           #
-          # 修法：直接在内核 config 片段里把这个符号的取值钉死，kconfig 就不再提问。
+          # 注意 kconfig 每次只报第一个 NEW 符号（先 IR_IMON_DECODER，补完又报
+          # IR_MCE_KBD_DECODER），逐个补是无穷回合。看 Kconfig 结构：
+          #   menuconfig RC_DECODERS ... if RC_DECODERS ... 所有 IR_*_DECODER ... endif
+          #   menuconfig RC_DEVICES  ... if RC_DEVICES  ... 所有 IR_* 设备   ... endif
+          # 所以把这两个 menuconfig 关掉，整组符号直接不可见，一次收敛。
           # 不用 `make kernel_oldconfig`——它依赖 prepare_kernel_conf → toolchain/install，
-          # 会先做完整工具链（2 核 runner 上一小时起），纯属白烧。
+          # 会先编一遍完整工具链（2 核 runner 上一小时起），纯属白烧。
           python3 - <<'PYEOF'
           import glob, io, os, re
-          SYMS = {'CONFIG_IR_IMON_DECODER': 'n'}
+          SYMS = {
+              'CONFIG_RC_DECODERS': 'n',        # 关掉整组 IR 协议解码器
+              'CONFIG_RC_DEVICES': 'n',         # 关掉整组 IR 接收设备驱动
+              'CONFIG_LIRC': 'n',               # LIRC 用户态接口
+              'CONFIG_IR_IMON_DECODER': 'n',    # 兜底：万一上游把该项移出 RC_DECODERS
+              'CONFIG_IR_MCE_KBD_DECODER': 'n',
+              'CONFIG_MEDIA_CEC_SUPPORT': 'n',  # 同类问题：CEC 组也是 menuconfig 包一窝
+          }
           files = [f for f in sorted(glob.glob('target/linux/mediatek/filogic/config-*'))
                    if os.path.isfile(f)]
           assert files, '找不到内核 config 片段'
@@ -224,10 +235,11 @@ jobs:
               print('%s: %s' % (f, ('补入 ' + ','.join(added)) if added else '已有取值，跳过'))
           PYEOF
           for f in target/linux/mediatek/filogic/config-*; do
-            grep -qE '^(CONFIG_IR_IMON_DECODER=|# CONFIG_IR_IMON_DECODER is not set)' "$f" \
-              || { echo "::error::$f 未写入 IR_IMON_DECODER"; exit 1; }
+            [ -f "$f" ] || continue
+            grep -qE '^# CONFIG_RC_DECODERS is not set$' "$f" \
+              || { echo "::error::$f 未写入 RC_DECODERS"; exit 1; }
           done
-          echo "✔ 内核 config 已补齐，编译阶段不会再有 NEW 符号交互"
+          echo "✔ 内核 RC 符号已钉死，编译阶段不会再有 NEW 符号交互"
 
       - name: 编译固件
         run: |
