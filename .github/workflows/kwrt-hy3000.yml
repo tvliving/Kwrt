@@ -187,6 +187,9 @@ jobs:
             echo "CONFIG_PACKAGE_luci-app-ttyd=y"
             echo "CONFIG_PACKAGE_quickstart=y"
             echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y"
+            # store 有 depends on !(PACKAGE_TAR_XZ) || PACKAGE_xz-utils：
+            # tar 被依赖带入后 TAR_XZ 默认=y，xz-utils 不装的话 store 会被压成不可见
+            echo "CONFIG_PACKAGE_xz-utils=y"
           } >> .config
           make defconfig
           grep -qE '^CONFIG_PACKAGE_kmod-mt7915e=y$' .config \
@@ -197,7 +200,8 @@ jobs:
           echo "---- tmp/.packageinfo 是否收录 ----"
           grep -c '^Package: luci-app-store$' tmp/.packageinfo || true
           grep -A8 '^Package: luci-app-store$' tmp/.packageinfo | head -12 || true
-          grep -n -A14 'config PACKAGE_luci-app-store$' tmp/.config-package.in || echo "tmp/.config-package.in 里没有该符号"
+          grep -n -B4 -A30 'config PACKAGE_luci-app-store$' tmp/.config-package.in | head -40 || echo "tmp/.config-package.in 里没有该符号"
+          grep -nE "TAR_XZ|LIBCURL_LDAP|PACKAGE_xz-utils|PACKAGE_tar =" tmp/.config-package.in | head -6 || true
           echo "---- Makefile 来源 ----"
           ls -d package/luci-app-store package/feeds/*/luci-app-store 2>/dev/null || true
           grep -n "LUCI_DEPENDS\|LUCI_EXTRA_DEPENDS" package/luci-app-store/Makefile 2>/dev/null || true
