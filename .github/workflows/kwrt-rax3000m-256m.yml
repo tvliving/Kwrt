@@ -191,30 +191,57 @@ jobs:
           done
           grep -q '^CONFIG_TARGET_mediatek_filogic=y' .config || { echo "::error::target 未生效"; exit 1; }
 
-      - name: 钉死内核可交互的新符号（避免 syncconfig 中断）
+      - name: 内核配置自动补默认值（根治 syncconfig 交互中断）
         run: |
           cd openwrt
-          # 本次选中的包把内核 RC_CORE 打开了，linux-6.12 的 drivers/media/rc/Kconfig 里
-          # 于是冒出一堆带 prompt 的新符号。它们没写进 target 的 config-6.12，编译阶段
-          # `SYNC include/config/auto.conf` 就会重启 kconfig 交互；runner 的 stdin 是 EOF
-          # → syncconfig Error 1，target/linux 直接失败。
+          # ── 病灶 ──────────────────────────────────────────────────────────────
+          # 这套全家桶把内核 RC_CORE 打开了，linux-6.12 的 drivers/media/rc/Kconfig
+          # 里因此冒出一堆带 prompt 的新符号（IR_IMON_DECODER、IR_MCE_KBD_DECODER、
+          # IR_RCMM_DECODER …）。它们不在内核 .config 里，编译阶段
+          # `SYNC include/config/auto.conf` 就会重启 kconfig 交互；runner 的 stdin 是
+          # EOF → `make[7]: *** [scripts/kconfig/Makefile:85: syncconfig] Error 1`，
+          # target/linux 整个失败。
           #
-          # 注意 kconfig 每次只报第一个 NEW 符号（先 IR_IMON_DECODER，补完又报
-          # IR_MCE_KBD_DECODER），逐个补是无穷回合。看 Kconfig 结构：
-          #   menuconfig RC_DECODERS ... if RC_DECODERS ... 所有 IR_*_DECODER ... endif
-          #   menuconfig RC_DEVICES  ... if RC_DEVICES  ... 所有 IR_* 设备   ... endif
-          # 所以把这两个 menuconfig 关掉，整组符号直接不可见，一次收敛。
-          # 不用 `make kernel_oldconfig`——它依赖 prepare_kernel_conf → toolchain/install，
+          # ── 为什么补 config 片段没用 ───────────────────────────────────────────
+          # Kernel/Configure 生成内核 .config 的最后一步是
+          #   package-metadata.pl kconfig ... > .config.override
+          #   kconfig.pl 'm+' '+' .config.target /dev/null .config.override > .config.set
+          # override 来自已选包的 KCONFIG，优先级最高，会把 target 片段里的值盖掉。
+          # kconfig 每次只报一个 NEW 符号，逐个补是无穷回合。
+          #
+          # ── 解法 ─────────────────────────────────────────────────────────────
+          # 在 Kernel/Configure/Default 末尾插一条 olddefconfig：它把所有未定义符号
+          # 一次性按默认值填好，完全不交互、只要几秒。
+          # 不选 `make kernel_oldconfig`：它依赖 prepare_kernel_conf → toolchain/install，
           # 会先编一遍完整工具链（2 核 runner 上一小时起），纯属白烧。
+          python3 - <<'PYEOF'
+          import io, re
+          p = 'include/kernel-defaults.mk'
+          s = io.open(p, encoding='utf-8').read()
+          if '$(KERNEL_MAKE) olddefconfig' in s:
+              print('olddefconfig 补丁已存在，跳过')
+          else:
+              m = re.search(r'define Kernel/Configure/Default\n(.*?)\nendef', s, re.S)
+              assert m, '找不到 Kernel/Configure/Default，上游结构已变，需人工核对'
+              s = s[:m.start(1)] + m.group(1) + '\n\t$(KERNEL_MAKE) olddefconfig' + s[m.end(1):]
+              io.open(p, 'w', encoding='utf-8').write(s)
+              print('✔ 已在 Kernel/Configure/Default 末尾插入 olddefconfig')
+          assert '$(KERNEL_MAKE) olddefconfig' in io.open(p, encoding='utf-8').read()
+          PYEOF
+          sed -n '/define Kernel\/Configure\/Default/,/^endef/p' include/kernel-defaults.mk | tail -4
+
+      - name: 关掉内核 RC/CEC 菜单（减少无谓的驱动探测）
+        run: |
+          cd openwrt
+          # 上面 olddefconfig 已经能兜住所有新符号；这里再把红外/遥控这整块关掉，
+          # 既省编译时间，也避免它们被 default y 拉进来。
           python3 - <<'PYEOF'
           import glob, io, os, re
           SYMS = {
-              'CONFIG_RC_DECODERS': 'n',        # 关掉整组 IR 协议解码器
-              'CONFIG_RC_DEVICES': 'n',         # 关掉整组 IR 接收设备驱动
-              'CONFIG_LIRC': 'n',               # LIRC 用户态接口
-              'CONFIG_IR_IMON_DECODER': 'n',    # 兜底：万一上游把该项移出 RC_DECODERS
-              'CONFIG_IR_MCE_KBD_DECODER': 'n',
-              'CONFIG_MEDIA_CEC_SUPPORT': 'n',  # 同类问题：CEC 组也是 menuconfig 包一窝
+              'CONFIG_RC_DECODERS': 'n',
+              'CONFIG_RC_DEVICES': 'n',
+              'CONFIG_LIRC': 'n',
+              'CONFIG_MEDIA_CEC_SUPPORT': 'n',
           }
           files = [f for f in sorted(glob.glob('target/linux/mediatek/filogic/config-*'))
                    if os.path.isfile(f)]
@@ -225,21 +252,12 @@ jobs:
               for k, v in SYMS.items():
                   if re.search(r'^(%s=|# %s is not set)$' % (k, k), s, re.M):
                       continue
-                  if v == 'n':
-                      s = s.rstrip('\n') + '\n# %s is not set\n' % k
-                  else:
-                      s = s.rstrip('\n') + '\n%s=%s\n' % (k, v)
+                  s = s.rstrip('\n') + '\n# %s is not set\n' % k
                   added.append(k)
               if added:
                   io.open(f, 'w', encoding='utf-8').write(s)
               print('%s: %s' % (f, ('补入 ' + ','.join(added)) if added else '已有取值，跳过'))
           PYEOF
-          for f in target/linux/mediatek/filogic/config-*; do
-            [ -f "$f" ] || continue
-            grep -qE '^# CONFIG_RC_DECODERS is not set$' "$f" \
-              || { echo "::error::$f 未写入 RC_DECODERS"; exit 1; }
-          done
-          echo "✔ 内核 RC 符号已钉死，编译阶段不会再有 NEW 符号交互"
 
       - name: 编译固件
         run: |
