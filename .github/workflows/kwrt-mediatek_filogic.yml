@@ -155,6 +155,15 @@ jobs:
           find "devices/$TARGET/patches" -maxdepth 1 -type f -name '*.patch' ! -name '*.revert.patch' ! -name '*.bin.patch' -print0 2>/dev/null \
             | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' --no-backup-if-mismatch -p1 -F 1 -i '%'" || true
 
+      - name: 启用中文语言包 + vendor iStore + 给 ≥128M 机型注入
+        run: |
+          cd openwrt
+          # 中文包：打开 luci-i18n-*-zh-cn 生成（common 的 luci_mk.patch 默认关掉了）
+          # iStore：树内 vendor 并删掉 feed 同名副本（否则仍按 feed 的架构约束被丢弃）
+          bash devices/common/istore-zh.sh
+          # iStore 只给闪存 >=128M 的机型，避免小闪存 image size 爆掉
+          python3 devices/common/inject-istore-128m.py target/linux/mediatek/image/filogic.mk
+
       - name: defconfig 并校验机型
         run: |
           cd openwrt
@@ -174,6 +183,12 @@ jobs:
             sed -i "s/\(kmod-qca.*\)=m/\1=n/" .config
             make defconfig
           fi
+          # 简体中文语言包：全量枚举选入（kconfig 只保留对应 app 已选中的那些）
+          awk '/^config PACKAGE_luci-i18n-.+-zh-cn$/{print $2"=y"}' tmp/.config-package.in >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" >> .config
+          make defconfig
+          grep -qE '^CONFIG_PACKAGE_luci-i18n-base-zh-cn=y$' .config \
+            || { echo "::error::简体中文语言包未生效"; exit 1; }
 
           echo "===== 启用的机型数（$TGT/$SUB） ====="
           # 25.12 两种机型行格式并存：CONFIG_TARGET_<t>_<s>_DEVICE_x / CONFIG_TARGET_DEVICE_<t>_<s>_DEVICE_x

@@ -42,7 +42,10 @@ git -C "$tmp/repo" sparse-checkout set \
   luci-app-store luci-app-quickstart quickstart taskd luci-lib-taskd luci-lib-xterm
 
 for p in luci-app-store luci-app-quickstart quickstart taskd luci-lib-taskd luci-lib-xterm; do
-  rm -rf "package/$p"
+  # 关键：kiddin9 feed 里也有同名包（package/feeds/kiddin9/<p>），
+  # 两处同时存在时 kconfig 仍按 feed 那份（带 @(x86_64||aarch64) 约束）定义，
+  # 结果还是被静默丢弃 —— 必须先删掉 feed 里的副本，只留树内这份
+  rm -rf "package/feeds/kiddin9/$p" "package/feeds/luci/$p" "package/$p"
   cp -a "$tmp/repo/$p" "package/$p"
   [ -f "package/$p/Makefile" ] || { echo "::error::iStore 包缺失: $p"; exit 1; }
 done
