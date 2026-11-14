@@ -1,0 +1,287 @@
+# Kwrt CMCC RAX3000M / XR30（NAND 硬改 256M Flash）固件构建
+#
+# 方案移植自 ReddotCleaner/rax3000m-256m-cloud-build（ImmortalWrt/OpenWrt 25.12）：
+#   只把 ubi 分区从 114MB 扩到 250.5MB，其余沿用上游 25.12 cmcc_rax3000m 的
+#   KERNEL_IN_UBI + FIT(kernel+rootfs) + /dev/fit0 启动方式，沿用机器现有 U-Boot
+#   （必须是支持 256M 布局的 U-Boot，128M 的 U-Boot 会启动失败）。
+#
+# 首页 / iStore / 中文：与 kwrt-hy3000.yml 同一套（devices/common/istore-zh.sh + 依赖链显式选入）
+# WiFi：mt76（kmod-mt7915e）+ overlay 里的 factory eeprom nvmem 校准数据
+name: 🛠️ Kwrt CMCC RAX3000M / XR30 (NAND 256M) Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      make_release:
+        description: 编译完成后发布 Release
+        type: boolean
+        default: true
+  push:
+    branches: [25.12]
+    paths:
+      - '.github/workflows/kwrt-rax3000m-256m.yml'
+      - 'devices/mediatek_filogic_rax3000m_256m/**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kwrt-rax3000m-256m
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Shanghai
+  TARGET: mediatek_filogic_rax3000m_256m
+  TAG_PREFIX: kwrt-rax3000m-256m
+  MIN_DEVICES: '2'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout 构建配方
+        uses: actions/checkout@v4
+
+      - name: 获取日期
+        run: echo "DATE=$(date +%Y%m%d)" >> "$GITHUB_ENV"
+
+      - name: 释放磁盘空间
+        uses: coder-xiaomo/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: 安装编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget dwarves \
+            llvm python3-pyelftools libpython3-dev aria2 jq qemu-utils ccache rename \
+            libelf-dev device-tree-compiler libgmp3-dev libmpc-dev libfuse-dev
+          sudo timedatectl set-timezone "Asia/Shanghai"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+      - name: 克隆 OpenWrt 源码（openwrt-25.12）
+        run: |
+          set -x
+          git clone --depth 1 -b openwrt-25.12 https://github.com/openwrt/openwrt openwrt
+
+      - name: 构建目录挂到大盘
+        run: |
+          sudo mkdir -p -m 777 /mnt/openwrt/build_dir openwrt/staging_dir
+          ln -sf /mnt/openwrt/build_dir openwrt/build_dir
+          sudo ln -sf "$PWD/openwrt/staging_dir" /mnt/openwrt/staging_dir
+
+      - name: 载入 Kwrt 定制（common diy.sh）
+        run: |
+          function git_clone_path() {
+            trap 'rm -rf "$tmpdir"' EXIT
+            branch="$1" rurl="$2" mv="$3"
+            [[ "$mv" != "mv" ]] && shift 2 || shift 3
+            rootdir="$PWD"
+            tmpdir="$(mktemp -d)" || exit 1
+            if [ ${#branch} -lt 10 ]; then
+              git clone -b "$branch" --depth 1 --filter=blob:none --sparse "$rurl" "$tmpdir"
+              cd "$tmpdir"
+            else
+              git clone --filter=blob:none --sparse "$rurl" "$tmpdir"
+              cd "$tmpdir"
+              git checkout $branch
+            fi
+            git sparse-checkout init --cone
+            git sparse-checkout set $@
+            [[ "$mv" != "mv" ]] && cp -rn ./* $rootdir/ || mv -n $@/* $rootdir/$@/
+            cd $rootdir
+          }
+          export -f git_clone_path
+          export REPO_TOKEN="${{ secrets.KWRT_TOKEN }}"
+          mkdir -p openwrt
+          cp -rf devices/common/. openwrt/
+          cp -rf "devices/$TARGET/." openwrt/
+          cp -rf devices openwrt/
+          cd openwrt
+          chmod +x devices/common/diy.sh
+          /bin/bash devices/common/diy.sh
+
+      - name: 注入 RAX3000M / XR30 256M 机型（dts + overlay + filogic.mk）
+        run: |
+          cd openwrt
+          cp -f devices/common/.config .config
+          echo >> .config
+          cat "devices/$TARGET/.config" >> .config
+          if [ -f "devices/$TARGET/diy.sh" ]; then
+            chmod +x "devices/$TARGET/diy.sh"
+            /bin/bash "devices/$TARGET/diy.sh"
+          fi
+          cp -Rf ./diy/* ./ 2>/dev/null || true
+
+      - name: 启用中文语言包 + 树内 vendor iStore（≥128M 闪存）
+        run: |
+          cd openwrt
+          # 256M NAND 远大于 128M，整套装：
+          #   · 打开 luci-i18n-*-zh-cn 生成（否则界面只有英文、iStore 首页被静默剔除）
+          #   · 树内 vendor iStore（feed 里的 luci-app-store 会被 kconfig 静默丢弃）
+          bash devices/common/istore-zh.sh
+
+      - name: defconfig 并校验机型
+        run: |
+          cd openwrt
+          # 树内新增的包（iStore）必须让 package 元数据重新扫描：
+          # 不删 tmp/.packageinfo 会漏掉刚 vendor 进去的包，
+          # 表现为 tmp/.config-package.in 里没有 PACKAGE_luci-app-store，.config 写 =y 也被静默丢弃
+          rm -f tmp/.packageinfo tmp/.config-package.in
+          make defconfig
+          sed -i "s/\(kmod-qca.*\)=m/\1=n/" .config
+          # 全量简体中文语言包：直接枚举这次构建里存在的 luci-i18n-*-zh-cn
+          awk '/^config PACKAGE_luci-i18n-.+-zh-cn$/{print $2"=y"}' tmp/.config-package.in >> .config
+          {
+            # WiFi：mt76 + 固件（DEVICE_PACKAGES 已有，这里双保险）
+            echo "CONFIG_PACKAGE_kmod-mt7915e=y"
+            echo "CONFIG_PACKAGE_kmod-mt7981-firmware=y"
+            echo "CONFIG_PACKAGE_mt7981-wo-firmware=y"
+            echo "CONFIG_PACKAGE_wpad-openssl=y"
+            echo "CONFIG_PACKAGE_wireless-regdb=y"
+            # iStore 软件中心 + 首页（抄 hy3000 方案）
+            echo "CONFIG_PACKAGE_luci-app-store=y"
+            echo "CONFIG_PACKAGE_luci-app-quickstart=y"
+            # kconfig 的 DEPENDS 是“要求”而非“自动选择”，依赖不满足时上面两行会被压成 n，
+            # 整条依赖链必须显式选入
+            echo "CONFIG_PACKAGE_luci-lib-taskd=y"
+            echo "CONFIG_PACKAGE_taskd=y"
+            echo "CONFIG_PACKAGE_luci-lua-runtime=y"
+            echo "CONFIG_PACKAGE_libuci-lua=y"
+            echo "CONFIG_PACKAGE_mount-utils=y"
+            echo "CONFIG_PACKAGE_luci-app-ttyd=y"
+            echo "CONFIG_PACKAGE_quickstart=y"
+            echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y"
+            # store 有 depends on !(PACKAGE_TAR_XZ) || PACKAGE_xz-utils
+            echo "CONFIG_PACKAGE_xz-utils=y"
+          } >> .config
+          make defconfig
+
+          grep -qE '^CONFIG_PACKAGE_kmod-mt7915e=y$' .config \
+            || { echo "::error::kmod-mt7915e 未启用，开机将没有 WiFi"; exit 1; }
+
+          for s in luci-app-store luci-app-quickstart luci-i18n-base-zh-cn; do
+            grep -qE "^CONFIG_PACKAGE_${s}=y$" .config \
+              || { echo "::error::${s} 未生效（iStore 或中文包会缺失）"; exit 1; }
+          done
+          n=$(grep -cE '^CONFIG_PACKAGE_luci-i18n-.+-zh-cn=y$' .config || true)
+          [ "$n" -ge 5 ] || { echo "::error::简体中文语言包数量异常：$n"; exit 1; }
+          echo "✔ iStore 已选入，简体中文语言包 $n 个"
+
+          echo "===== 启用的机型 ====="
+          grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config
+          n=$(grep -cE '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config || true)
+          [ "$n" -eq "$MIN_DEVICES" ] || { echo "::error::机型数量应为 $MIN_DEVICES，实际 $n"; exit 1; }
+          for d in cmcc_rax3000m_nand cmcc_xr30_nand; do
+            grep -q "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${d}=y\$" .config \
+              || { echo "::error::${d} 未生效"; exit 1; }
+          done
+          grep -q '^CONFIG_TARGET_mediatek_filogic=y' .config || { echo "::error::target 未生效"; exit 1; }
+
+      - name: 编译固件
+        run: |
+          set -o pipefail
+          cd openwrt
+          df -hT
+          if ! make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log; then
+            echo "::warning::并行编译失败，取错误日志"
+            grep -nE 'Error [0-9]+|error:|No rule to make target|failed to build' build.log | tail -40 || true
+            pkgs=$(grep -oE '[A-Za-z0-9_./-]+ failed to build' build.log | awk '{print $1}' | sort -u || true)
+            for pkg in $pkgs; do
+              echo "" >> build.log
+              echo "===== 详细错误（make -j1 V=s $pkg/compile）=====" >> build.log
+              timeout 2400 make -j1 V=s "$pkg/compile" 2>&1 | tail -200 | tee -a build.log || true
+            done
+            exit 1
+          fi
+          df -hT
+
+      - name: 上传编译日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            openwrt/build.log
+            openwrt/logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: 收集产物
+        id: collect
+        run: |
+          mkdir -p out
+          B=openwrt/bin/targets/mediatek/filogic
+          ls -lh "$B" | head -40
+          cp -f "$B"/*cmcc_rax3000m_nand* out/ 2>/dev/null || true
+          cp -f "$B"/*cmcc_xr30_nand* out/ 2>/dev/null || true
+          ls -lh out || true
+          ls out/*sysupgrade.itb >/dev/null 2>&1 \
+            || { echo "::error::缺少 sysupgrade.itb"; exit 1; }
+          for d in cmcc_rax3000m_nand cmcc_xr30_nand; do
+            ls out/*"$d"*sysupgrade.itb >/dev/null 2>&1 \
+              || { echo "::error::$d 没有产出 sysupgrade.itb"; exit 1; }
+          done
+          (cd out && sha256sum ./* > sha256sums.txt)
+          DU=$(du -sh out | cut -f1)
+          echo "size=$DU" >> "$GITHUB_OUTPUT"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: kwrt-rax3000m-256m-images
+          path: out/
+          retention-days: 14
+
+      - name: 发布 Release
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.make_release != false }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_PREFIX }}-${{ env.DATE }}
+          name: Kwrt CMCC RAX3000M / XR30 (NAND 256M) ${{ env.DATE }}
+          body: |
+            Kwrt CMCC RAX3000M / XR30（NAND 硬改 256M Flash）自动编译
+
+            - 源码: openwrt/openwrt `openwrt-25.12` + Kwrt devices/common 定制
+            - 分区: ubi 由 114MB 扩到 **250.5MB**（`0x580000 + 0xFA80000`），其余沿用上游
+            - 启动: 沿用 `KERNEL_IN_UBI` + FIT(kernel+rootfs) + `/dev/fit0`，**不刷 preloader/fip**
+            - WiFi: mt76（kmod-mt7915e）+ factory eeprom nvmem 校准，2.4G/5G 双频
+            - 首页/iStore: luci-app-quickstart 首页 + luci-app-store 软件中心 + 全量简体中文包
+            - 默认 IP: 10.0.0.1 / 用户名 root / 无密码
+            - 工作流: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            ### ⚠️ 刷机前必须确认
+
+            1. 机器必须是 **硬改 256M Flash**，且 U-Boot 是支持 256M 布局的大分区版
+               （如 1715173329 的 RAX3000M U-Boot，支持 stock/expand 切换）。
+               **128M 的 U-Boot 刷本固件会启动失败**；BL2/FIP 也要与 256M 匹配，不能混用。
+            2. 刷机流程：
+               ① U-Boot Web（192.168.1.1）上传 `*-initramfs-recovery.itb` → Update
+               ② 重启进临时系统
+               ③ LuCI → 系统 → 备份/升级 → 上传 `*-sysupgrade.itb`（跨发行版建议不保留配置）
+            3. 刷完验证：`cat /proc/mtd`（看 ubi 是否约 250M）、`df -h | grep overlay`
+
+            ### 附件说明
+
+            - `*cmcc_rax3000m_nand-squashfs-sysupgrade.itb`: RAX3000M 256M 正式固件
+            - `*cmcc_xr30_nand-squashfs-sysupgrade.itb`: XR30 256M 正式固件
+            - `*-initramfs-recovery.itb`: 过渡/救援系统（U-Boot Web 先刷这个）
+            - `sha256sums.txt`: 校验和
+
+            RAX3000M 与 XR30 硬件同源（分区表/MAC/WiFi eeprom 完全一致），两个固件可互换刷写，
+            只是设备型号显示不同。
+          files: out/*
+          fail_on_unmatched_files: false
