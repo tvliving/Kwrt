@@ -1,0 +1,88 @@
+# 从指定构建 run 的 artifact 补发 Release
+# 用途：构建成功但「发布 Release」步骤被跳过（例如 push/schedule 触发时 inputs 为空），
+#       无需重编译，直接把已有 artifact 发布出来。
+name: Kwrt HY3000 补发 Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 要补发的 Actions run ID（构建产物所在 run）
+        required: true
+      tag:
+        description: Release tag（留空则用 kwrt-hy3000-<北京日期>）
+        required: false
+        default: ''
+      artifact:
+        description: artifact 名称
+        required: false
+        default: kwrt-hy3000-images
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact }}
+          path: out
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 列出产物
+        run: ls -lh out
+
+      - name: 校验产物（sysupgrade 主件必须存在）
+        run: |
+          ls out/*sysupgrade.bin >/dev/null 2>&1 \
+            || { echo "::error::artifact 里没有 sysupgrade.bin，可能不是 lede 方案的构建"; ls out; exit 1; }
+
+      - name: 发布
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_INPUT: ${{ inputs.tag }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -e
+          TAG="${TAG_INPUT:-kwrt-hy3000-$(TZ=Asia/Shanghai date +%Y%m%d)}"
+          echo ">>> 发布到 $TAG"
+
+          {
+            echo "Kwrt PHILIPS HY3000 (MT7981B + eMMC) 自动编译"
+            echo
+            echo "- 机型方案: 与 tvliving/lede 的 philips_hy3000 一致（内核 FIT + 独立 rootfs 分区 + sysupgrade-tar，\`root=PARTLABEL=rootfs\`）"
+            echo "- 引导: 沿用机器现有 U-Boot，不刷 preloader / fip / gpt"
+            echo "- WiFi: mt76（kmod-mt7915e）+ 2.4G/5G 双频默认开启"
+            echo "- 默认 IP: 10.0.0.1 / 用户名 root / 无密码"
+            echo "- 来源 run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
+            echo
+            echo "### 刷机"
+            echo "1. 已有系统（lede / Kwrt / OpenWrt）：LuCI → 系统 → 备份/升级 → 上传 \`*-sysupgrade.bin\`（跨发行版升级不要勾选保留配置）"
+            echo "2. 原厂 / 变砖：先用 \`*-initramfs-kernel.bin\` TFTP 引导进内存系统，再上传 \`*-sysupgrade.bin\`"
+            echo "3. 命令行：\`sysupgrade -n /tmp/xxx-sysupgrade.bin\`"
+            echo
+            echo "### 附件"
+            echo "- \`*-sysupgrade.bin\`: 升级包（tar：内核 FIT + rootfs squashfs）"
+            echo "- \`*-initramfs-kernel.bin\`: 内存系统，救援 / 首次引导用"
+            echo "- \`sha256sums.txt\`: 校验和"
+          } > notes.md
+
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "Kwrt HY3000 ($(TZ=Asia/Shanghai date +%Y-%m-%d))" --notes-file notes.md
+
+          for i in 1 2 3 4 5; do
+            if gh release upload "$TAG" out/* --repo "$GITHUB_REPOSITORY" --clobber; then
+              echo ">>> ✅ 上传完成"
+              exit 0
+            fi
+            echo ">>> 第 $i 次上传失败，10 秒后重试"
+            sleep 10
+          done
+          echo ">>> ❌ 上传 5 次均失败"
+          exit 1

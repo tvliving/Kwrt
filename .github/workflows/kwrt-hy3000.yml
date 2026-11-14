@@ -224,7 +224,9 @@ jobs:
           retention-days: 14
 
       - name: 发布 Release
-        if: ${{ github.event_name == 'schedule' || inputs.make_release != false }}
+        # push/schedule 触发时 inputs.* 为空，不能再用 inputs.make_release != false 判断
+        # （null != false 在 GH 表达式里为 false，会导致静默跳过发布）
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.make_release != false }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG_PREFIX }}-${{ env.DATE }}
