@@ -179,9 +179,27 @@ jobs:
           # tplink/mercusys/zyxel/dlink 32~50M 等，共 28 款，从上游 filogic.mk 枚举）。
           # 这些机型与 Kwrt 固件体积不兼容，如需支持需单独裁剪包列表，勿直接恢复。
           SMALL_DEVICES="totolink_x6000r wavlink_wl-wn573hx3 yuncore_ax835 widelantech_wap430x kebidumei_ax3000-u22 cudy_re3000-v1 cudy_wr3000-v1 wavlink_wl-wn586x3 buffalo_wsr-6000ax8 gatonetworks_gdsp iptime_ax3000q iptime_ax3000se iptime_ax3000sm iptime_ax3000m iptime_ax7800m-6e netgear_wax220 tplink_fr365-v1 tplink_eap683-lr tenbay_wr3000k dlink_aquila-pro-ai-e30-a1 dlink_aquila-pro-ai-m30-a1 dlink_aquila-pro-ai-m60-a1 mercusys_mr90x-v1 tplink_archer-ax80-v1 tplink_archer-ax80-v1-eu tplink_be450 tplink_re6000xd zyxel_nwa50ax-pro"
+          # 注意：只追加 "# ... is not set" 是无效的——.config 里已有的 "=y"（来自
+          # devices/$TARGET/.config 与 ALL_PROFILES 的默认值）会先生效，kconfig 取第一条，
+          # 结果这些机型still在编镜像，超限后 check-size 删掉产物让整轮构建失败
+          # （11/15 MT7981/MT7986 两次实证）。这里先把已有赋值整行删掉，再统一追加 n。
+          SYMS=""
           for d in $SMALL_DEVICES; do
-            echo "# CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_$(echo "$d" | tr 'a-z-' 'A-Z_') is not set" >> .config
+            SYMS="$SYMS CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_$(echo "$d" | tr 'a-z-' 'A-Z_')"
           done
+          python3 - $SYMS <<'PYEOF'
+          import sys
+          syms = set(sys.argv[1:])
+          keep = []
+          for line in open(".config", encoding="utf-8", errors="surrogateescape"):
+              name = line.split("=")[0].replace("# ", "").split(" ")[0]
+              if name in syms:
+                  continue
+              keep.append(line)
+          for s in sys.argv[1:]:
+              keep.append("# %s is not set" % s + "\n")
+          open(".config", "w", encoding="utf-8", errors="surrogateescape").writelines(keep)
+          PYEOF
           # 与 Kwrt 官方一致：无 WiFi 的目标跳过无线驱动置 n
           if [[ ! "$TARGET" =~ (amlogic_meson8b|armsr_armv8|bcm27xx_*|rockchip_armv8|sunxi_*|siflower_*|x86_*) ]]; then
             sed -n '/# Wireless Drivers/,/# end of Wireless Drivers/p' .config | sed -e 's/=m/=n/' >> .config
@@ -220,11 +238,67 @@ jobs:
           set -o pipefail
           cd openwrt
           df -hT
-          make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log || {
-            echo "::warning::并行编译失败，取错误日志"
-            grep -nE 'Error [0-9]+|error:|No rule to make target' build.log | tail -40 || true
-            exit 1
-          }
+          rm -f build.log
+          ok=0
+          PARTIAL=0
+          for attempt in 1 2 3; do
+            echo "===== world 第 $attempt 轮 ====="
+            if make -j"$(( $(nproc) + 1 ))" 2>&1 | tee -a build.log; then ok=1; break; fi
+            echo "::warning::第 $attempt 轮并行编译失败，取错误日志"
+            grep -nE 'Error [0-9]+|error:|No rule to make target|failed to build' build.log | tail -40 || true
+            # 保留 " [host]" 后缀：gettext-full 这类包失败时是
+            #   ERROR: package/libs/gettext-full [host] failed to build.
+            # 旧写法按第一个词取，整条匹配不上会误判成"没识别出失败包"
+            mapfile -t pkgs < <(grep -oE '(package|feeds|tools|toolchain|target)/[A-Za-z0-9_./-]+( \[[a-zA-Z0-9_]+\])? failed to build' build.log \
+                                  | sed 's/ failed to build$//' | sort -u)
+            [ "${#pkgs[@]}" -gt 0 ] || { echo "::error::日志里没识别出失败包"; tail -80 build.log; exit 1; }
+            die=0
+            for pkg in "${pkgs[@]}"; do
+              # target/linux 的失败点在镜像生成阶段（target/linux/install），
+              # 重跑 compile 只会把内核再编一遍，看不到真正的报错
+              case "$pkg" in
+                target/linux) tgt="target/install" ;;
+                *" [host]")   tgt="${pkg% \[host\]}/host/compile" ;;
+                *" ["*)       tgt="${pkg% \[*}/compile" ;;
+                *)            tgt="$pkg/compile" ;;
+              esac
+              echo "" >> build.log
+              echo "===== 详细错误（make -j1 V=s $tgt）=====" >> build.log
+              if timeout 3600 make -j1 V=s "$tgt" 2>&1 | tail -400 | tee -a build.log; then
+                echo "::warning::$tgt 单线程重跑成功（并行竞态），继续后续编译" | tee -a build.log
+              else
+                case "$pkg" in
+                  target/linux)
+                    # 全机型发布：个别机型自己的镜像超限会让整轮白编。
+                    # 典型是 gatonetworks_gdsp 这类 IMAGE_SIZE=32M 的机器，
+                    # ARTIFACT/sdcard.img.gz 里 check-size 发现超限后 rm -f 删掉产物，
+                    # 紧接着的 gzip 就报 "No such file or directory" → make Error 1。
+                    # 这里用 make -k 把其余 100+ 机型尽量生成，只把失败机型记进日志。
+                    echo "::warning::target/install 仍失败，改用 make -k 继续生成其余机型" | tee -a build.log
+                    make -k -j1 target/install 2>&1 \
+                      | grep -E "WARNING: Image file .* is too big|Error [0-9]+|ERROR: |No such file" \
+                      | tail -40 | tee -a build.log || true
+                    PARTIAL=1
+                    ;;
+                  *)
+                    echo "::error::$tgt 单线程重跑仍失败" | tee -a build.log
+                    die=1
+                    ;;
+                esac
+              fi
+            done
+            if [ "$die" = 1 ]; then
+              echo "===== bin/targets 现状 =====" | tee -a build.log
+              ls -lR bin/targets 2>&1 | tail -80 | tee -a build.log || true
+              exit 1
+            fi
+            if [ "${PARTIAL:-0}" = 1 ]; then
+              echo "::warning::部分机型镜像未生成（多为 IMAGE_SIZE 超限），其余机型继续发布"
+              ok=1
+              break
+            fi
+          done
+          [ "$ok" = 1 ] || { echo "::error::编译 3 轮后仍未成功"; exit 1; }
           df -hT
 
       - name: 上传编译日志（失败时）

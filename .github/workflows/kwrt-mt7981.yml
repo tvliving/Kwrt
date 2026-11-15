@@ -154,9 +154,27 @@ jobs:
           # tplink/mercusys/zyxel/dlink 32~50M 等，共 28 款，从上游 filogic.mk 枚举）。
           # 这些机型与 Kwrt 固件体积不兼容，如需支持需单独裁剪包列表，勿直接恢复。
           SMALL_DEVICES="totolink_x6000r wavlink_wl-wn573hx3 yuncore_ax835 widelantech_wap430x kebidumei_ax3000-u22 cudy_re3000-v1 cudy_wr3000-v1 wavlink_wl-wn586x3 buffalo_wsr-6000ax8 gatonetworks_gdsp iptime_ax3000q iptime_ax3000se iptime_ax3000sm iptime_ax3000m iptime_ax7800m-6e netgear_wax220 tplink_fr365-v1 tplink_eap683-lr tenbay_wr3000k dlink_aquila-pro-ai-e30-a1 dlink_aquila-pro-ai-m30-a1 dlink_aquila-pro-ai-m60-a1 mercusys_mr90x-v1 tplink_archer-ax80-v1 tplink_archer-ax80-v1-eu tplink_be450 tplink_re6000xd zyxel_nwa50ax-pro"
+          # 注意：只追加 "# ... is not set" 是无效的——.config 里已有的 "=y"（来自
+          # devices/$TARGET/.config 与 ALL_PROFILES 的默认值）会先生效，kconfig 取第一条，
+          # 结果这些机型still在编镜像，超限后 check-size 删掉产物让整轮构建失败
+          # （11/15 MT7981/MT7986 两次实证）。这里先把已有赋值整行删掉，再统一追加 n。
+          SYMS=""
           for d in $SMALL_DEVICES; do
-            echo "# CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_$(echo "$d" | tr 'a-z-' 'A-Z_') is not set" >> .config
+            SYMS="$SYMS CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_$(echo "$d" | tr 'a-z-' 'A-Z_')"
           done
+          python3 - $SYMS <<'PYEOF'
+          import sys
+          syms = set(sys.argv[1:])
+          keep = []
+          for line in open(".config", encoding="utf-8", errors="surrogateescape"):
+              name = line.split("=")[0].replace("# ", "").split(" ")[0]
+              if name in syms:
+                  continue
+              keep.append(line)
+          for s in sys.argv[1:]:
+              keep.append("# %s is not set" % s + "\n")
+          open(".config", "w", encoding="utf-8", errors="surrogateescape").writelines(keep)
+          PYEOF
           # 与 Kwrt 官方一致：无线驱动全部置 n（固件体积/兼容考虑）
           sed -n '/# Wireless Drivers/,/# end of Wireless Drivers/p' .config | sed -e 's/=m/=n/' >> .config
           sed -i "s/\(kmod-qca.*\)=m/\1=n/" .config
