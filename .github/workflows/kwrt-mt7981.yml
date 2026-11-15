@@ -191,15 +191,21 @@ jobs:
             if make -j"$(( $(nproc) + 1 ))" 2>&1 | tee -a build.log; then ok=1; break; fi
             echo "::warning::第 $attempt 轮并行编译失败，取错误日志"
             grep -nE 'Error [0-9]+|error:|No rule to make target|failed to build' build.log | tail -40 || true
-            pkgs=$(grep -oE '[A-Za-z0-9_./-]+ failed to build' build.log | awk '{print $1}' | sort -u || true)
-            [ -n "$pkgs" ] || { echo "::error::日志里没识别出失败包"; exit 1; }
+            # 保留 " [host]" 后缀：gettext-full 这类包失败时是
+            #   ERROR: package/libs/gettext-full [host] failed to build.
+            # 旧写法按第一个词取，整条匹配不上会误判成"没识别出失败包"
+            mapfile -t pkgs < <(grep -oE '(package|feeds|tools|toolchain|target)/[A-Za-z0-9_./-]+( \[[a-zA-Z0-9_]+\])? failed to build' build.log \
+                                  | sed 's/ failed to build$//' | sort -u)
+            [ "${#pkgs[@]}" -gt 0 ] || { echo "::error::日志里没识别出失败包"; tail -80 build.log; exit 1; }
             die=0
-            for pkg in $pkgs; do
+            for pkg in "${pkgs[@]}"; do
               # target/linux 的失败点在镜像生成阶段（target/linux/install），
               # 重跑 compile 只会把内核再编一遍，看不到真正的报错
               case "$pkg" in
                 target/linux) tgt="target/install" ;;
-                *) tgt="$pkg/compile" ;;
+                *" [host]")   tgt="${pkg% \[host\]}/host/compile" ;;
+                *" ["*)       tgt="${pkg% \[*}/compile" ;;
+                *)            tgt="$pkg/compile" ;;
               esac
               echo "" >> build.log
               echo "===== 详细错误（make -j1 V=s $tgt）=====" >> build.log

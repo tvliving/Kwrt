@@ -280,11 +280,20 @@ jobs:
           if ! make -j"$(( $(nproc) + 1 ))" </dev/null 2>&1 | tee build.log; then
             echo "::warning::并行编译失败，取错误日志"
             grep -nE 'Error [0-9]+|error:|No rule to make target|failed to build' build.log | tail -40 || true
-            pkgs=$(grep -oE '[A-Za-z0-9_./-]+ failed to build' build.log | awk '{print $1}' | sort -u || true)
-            for pkg in $pkgs; do
+            # 保留 " [host]" 后缀：gettext-full 这类包失败时是
+            #   ERROR: package/libs/gettext-full [host] failed to build.
+            # 旧写法按第一个词取，整条匹配不上会误判成"没识别出失败包"
+            mapfile -t pkgs < <(grep -oE '(package|feeds|tools|toolchain|target)/[A-Za-z0-9_./-]+( \[[a-zA-Z0-9_]+\])? failed to build' build.log \
+                                  | sed 's/ failed to build$//' | sort -u)
+            for pkg in "${pkgs[@]}"; do
+              case "$pkg" in
+                *" [host]") tgt="${pkg% \[host\]}/host/compile" ;;
+                *" ["*)     tgt="$pkg/compile" ;;
+                *)          tgt="$pkg/compile" ;;
+              esac
               echo "" >> build.log
-              echo "===== 详细错误（make -j1 V=s $pkg/compile）=====" >> build.log
-              timeout 2400 make -j1 V=s "$pkg/compile" 2>&1 | tail -200 | tee -a build.log || true
+              echo "===== 详细错误（make -j1 V=s $tgt）=====" >> build.log
+              timeout 2400 make -j1 V=s "$tgt" 2>&1 | tail -200 | tee -a build.log || true
             done
             exit 1
           fi
