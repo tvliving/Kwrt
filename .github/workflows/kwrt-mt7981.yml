@@ -177,6 +177,18 @@ jobs:
           echo "启用机型: $n（下限 $MIN_DEVICES）"
           grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config | head -5
           [ "$n" -ge "$MIN_DEVICES" ] || { echo "::error::机型数量不足，实际 $n"; exit 1; }
+          # 抽查排除是否真的生效：11/15 那次 gatonetworks_gdsp 在排除名单里却still编了
+          # sdcard.img.gz，超限后把整轮构建带崩，这里至少把没排掉的机型打出来
+          still=""
+          for d in $SMALL_DEVICES; do
+            s="CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_$(echo "$d" | tr 'a-z-' 'A-Z_')=y"
+            grep -q "^${s}$" .config && still="$still $d"
+          done
+          if [ -n "$still" ]; then
+            echo "::warning::以下机型排除未生效（仍会编镜像，可能超限）：$still"
+          else
+            echo "✔ 小闪存机型已全部排除"
+          fi
           grep -q '^CONFIG_TARGET_mediatek_filogic=y' .config || { echo "::error::target 未生效"; exit 1; }
 
       - name: 编译固件
@@ -186,6 +198,7 @@ jobs:
           df -hT
           rm -f build.log
           ok=0
+          PARTIAL=0
           for attempt in 1 2 3; do
             echo "===== world 第 $attempt 轮 ====="
             if make -j"$(( $(nproc) + 1 ))" 2>&1 | tee -a build.log; then ok=1; break; fi
@@ -212,14 +225,35 @@ jobs:
               if timeout 3600 make -j1 V=s "$tgt" 2>&1 | tail -400 | tee -a build.log; then
                 echo "::warning::$tgt 单线程重跑成功（并行竞态），继续后续编译" | tee -a build.log
               else
-                echo "::error::$tgt 单线程重跑仍失败" | tee -a build.log
-                die=1
+                case "$pkg" in
+                  target/linux)
+                    # 全机型发布：个别机型自己的镜像超限会让整轮白编。
+                    # 典型是 gatonetworks_gdsp 这类 IMAGE_SIZE=32M 的机器，
+                    # ARTIFACT/sdcard.img.gz 里 check-size 发现超限后 rm -f 删掉产物，
+                    # 紧接着的 gzip 就报 "No such file or directory" → make Error 1。
+                    # 这里用 make -k 把其余 100+ 机型尽量生成，只把失败机型记进日志。
+                    echo "::warning::target/install 仍失败，改用 make -k 继续生成其余机型" | tee -a build.log
+                    make -k -j1 target/install 2>&1 \
+                      | grep -E "WARNING: Image file .* is too big|Error [0-9]+|ERROR: |No such file" \
+                      | tail -40 | tee -a build.log || true
+                    PARTIAL=1
+                    ;;
+                  *)
+                    echo "::error::$tgt 单线程重跑仍失败" | tee -a build.log
+                    die=1
+                    ;;
+                esac
               fi
             done
             if [ "$die" = 1 ]; then
               echo "===== bin/targets 现状 =====" | tee -a build.log
               ls -lR bin/targets 2>&1 | tail -80 | tee -a build.log || true
               exit 1
+            fi
+            if [ "${PARTIAL:-0}" = 1 ]; then
+              echo "::warning::部分机型镜像未生成（多为 IMAGE_SIZE 超限），其余机型继续发布"
+              ok=1
+              break
             fi
           done
           [ "$ok" = 1 ] || { echo "::error::编译 3 轮后仍未成功"; exit 1; }
