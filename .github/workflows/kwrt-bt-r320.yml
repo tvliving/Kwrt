@@ -242,10 +242,18 @@ jobs:
             # 并行编译的输出会掩盖真正原因：定位失败包后单线程 V=s 重跑一次，把详细错误留在日志里
             pkgs=$(grep -oE '[A-Za-z0-9_./-]+ failed to build' build.log | awk '{print $1}' | sort -u || true)
             for pkg in $pkgs; do
+              # target/linux 的失败点在镜像生成阶段（target/linux/install），
+              # 重跑 compile 只会把内核再编一遍，看不到真正报错
+              case "$pkg" in
+                target/linux) tgt="target/install" ;;
+                *) tgt="$pkg/compile" ;;
+              esac
               echo "" >> build.log
-              echo "===== 详细错误（make -j1 V=s $pkg/compile）=====" >> build.log
-              timeout 2400 make -j1 V=s "$pkg/compile" 2>&1 | tail -200 | tee -a build.log || true
+              echo "===== 详细错误（make -j1 V=s $tgt）=====" >> build.log
+              timeout 2400 make -j1 V=s "$tgt" 2>&1 | tail -400 | tee -a build.log || true
             done
+            echo "===== bin/targets 现状 =====" | tee -a build.log
+            ls -lR bin/targets 2>&1 | tail -60 | tee -a build.log || true
             exit 1
           fi
           df -hT

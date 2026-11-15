@@ -41,9 +41,12 @@ NEW_BLOCK = '''define Device/globitel_bt-r320
   DEVICE_DTS_DIR := ../dts
   DEVICE_PACKAGES := kmod-usb3 kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware \\
 \tf2fsck mkf2fs
+  KERNEL_LOADADDR := 0x44000000
   KERNEL := kernel-bin | lzma | fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb
   KERNEL_INITRAMFS := kernel-bin | lzma | \\
 \tfit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb with-initrd | pad-to 64k
+  KERNEL_INITRAMFS_SUFFIX := -recovery.itb
+  IMAGES := sysupgrade.bin
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
   SUPPORTED_DEVICES += globitel,bt-r320
 endef
@@ -54,7 +57,9 @@ m = re.search(r'define Device/globitel_bt-r320\n.*?\nTARGET_DEVICES \+= globitel
 if not m:
     sys.exit('filogic.mk: 找不到上游 globitel_bt-r320 设备块（上游结构已变，需人工核对）')
 
-if 'IMAGE/sysupgrade.bin := sysupgrade-tar' in m.group(0):
+if ('IMAGE/sysupgrade.bin := sysupgrade-tar' in m.group(0)
+        and 'KERNEL_LOADADDR := 0x44000000' in m.group(0)
+        and 'IMAGES := sysupgrade.bin' in m.group(0)):
     print('filogic.mk: 已是 sysupgrade-tar 版本，跳过')
 else:
     s = s[:m.start()] + NEW_BLOCK + s[m.end():]
