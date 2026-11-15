@@ -1,0 +1,321 @@
+# Kwrt Globitel BT-R320 (MT7981B + MT7531AE + eMMC) 固件构建
+#
+# 机型方案与 tvliving/lede master 的 globitel_bt-r320 保持一致：
+#   内核单独一个 FIT 分区 + rootfs 独立分区 + sysupgrade-tar 升级包，
+#   DTS 用 root=PARTLABEL=rootfs 由内核自己找根分区，沿用机器现有 U-Boot
+#   （不刷 preloader / fip / gpt，产物为 sysupgrade.bin）。
+#
+# openwrt-25.12 上游虽然自带 globitel_bt-r320，但用的是 fitblk / sysupgrade.itb
+# 新方案（bootargs root=/dev/fit0 + ARTIFACTS gpt/preloader/fip），原厂 U-Boot 加载不了，
+# devices/mediatek_filogic_bt_r320/diy.sh 会把它改成上面这套 tar 方案。
+#
+# WiFi：mt76（kmod-mt7915e）+ DTS 取 eMMC factory 0x0 校准数据，
+#       注意不能沿用全机型构建「Wireless Drivers 全置 n」的逻辑。
+# 参考方案：EasongChung/Actions-BT-R320-Immortalwrt-6.6（ImmortalWrt 24.10-6.6）
+name: 🛠️ Kwrt Globitel BT-R320 (MT7981 eMMC) Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      make_release:
+        description: 编译完成后发布 Release
+        type: boolean
+        default: true
+  push:
+    branches: [25.12]
+    paths:
+      - '.github/workflows/kwrt-hy3000.yml'
+      - 'devices/mediatek_filogic_bt_r320/**'
+  schedule:
+    # 每周一 09:00（北京时间，UTC+8 → UTC 01:00），与 kwrt-mt7981/mt7986 相同
+    - cron: '0 1 * * 1'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kwrt-bt-r320
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Shanghai
+  TARGET: mediatek_filogic_bt_r320
+  TAG_PREFIX: kwrt-bt-r320
+  MIN_DEVICES: '1'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout 构建配方
+        uses: actions/checkout@v4
+
+      - name: 获取日期
+        run: echo "DATE=$(date +%Y%m%d)" >> "$GITHUB_ENV"
+
+      - name: 释放磁盘空间
+        uses: coder-xiaomo/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: 安装编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget dwarves \
+            llvm python3-pyelftools libpython3-dev aria2 jq qemu-utils ccache rename \
+            libelf-dev device-tree-compiler libgmp3-dev libmpc-dev libfuse-dev
+          sudo timedatectl set-timezone "Asia/Shanghai"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+      - name: 克隆 OpenWrt 源码（openwrt-25.12）
+        run: |
+          set -x
+          git clone --depth 1 -b openwrt-25.12 https://github.com/openwrt/openwrt openwrt
+
+      - name: 构建目录挂到大盘
+        run: |
+          sudo mkdir -p -m 777 /mnt/openwrt/build_dir openwrt/staging_dir
+          ln -sf /mnt/openwrt/build_dir openwrt/build_dir
+          sudo ln -sf "$PWD/openwrt/staging_dir" /mnt/openwrt/staging_dir
+
+      - name: 载入 Kwrt 定制（common diy.sh）
+        run: |
+          function git_clone_path() {
+            trap 'rm -rf "$tmpdir"' EXIT
+            branch="$1" rurl="$2" mv="$3"
+            [[ "$mv" != "mv" ]] && shift 2 || shift 3
+            rootdir="$PWD"
+            tmpdir="$(mktemp -d)" || exit 1
+            if [ ${#branch} -lt 10 ]; then
+              git clone -b "$branch" --depth 1 --filter=blob:none --sparse "$rurl" "$tmpdir"
+              cd "$tmpdir"
+            else
+              git clone --filter=blob:none --sparse "$rurl" "$tmpdir"
+              cd "$tmpdir"
+              git checkout $branch
+            fi
+            git sparse-checkout init --cone
+            git sparse-checkout set $@
+            [[ "$mv" != "mv" ]] && cp -rn ./* $rootdir/ || mv -n $@/* $rootdir/$@/
+            cd $rootdir
+          }
+          export -f git_clone_path
+          export REPO_TOKEN="${{ secrets.KWRT_TOKEN }}"
+          mkdir -p openwrt
+          cp -rf devices/common/. openwrt/
+          cp -rf "devices/$TARGET/." openwrt/
+          cp -rf devices openwrt/
+          cd openwrt
+          chmod +x devices/common/diy.sh
+          /bin/bash devices/common/diy.sh
+
+      - name: 注入 BT-R320 机型（diy.sh + diy 覆盖 + 补丁）
+        run: |
+          cd openwrt
+          cp -f devices/common/.config .config
+          echo >> .config
+          cat "devices/$TARGET/.config" >> .config
+          if [ -f "devices/$TARGET/diy.sh" ]; then
+            chmod +x "devices/$TARGET/diy.sh"
+            /bin/bash "devices/$TARGET/diy.sh"
+          fi
+          cp -Rf ./diy/* ./ 2>/dev/null || true
+
+      - name: 应用补丁
+        run: |
+          cd openwrt
+          cp -rn devices/common/patches "devices/$TARGET/" 2>/dev/null || true
+
+          # 不再打 U-Boot 源码补丁：BT-R320 沿用原厂 U-Boot，不编译/不替换引导，
+          # 机型支持全部由 diy.sh 注入到 filogic.mk / platform.sh / 02_network。
+
+          if [ -n "$(ls -A "devices/$TARGET"/*.bin.patch 2>/dev/null)" ]; then
+            git apply "devices/$TARGET"/patches/*.bin.patch || true
+          fi
+          find "devices/$TARGET/patches" -maxdepth 1 -type f -name '*.revert.patch' -print0 2>/dev/null \
+            | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' -R --no-backup-if-mismatch -p1 -F 1 -i '%'" || true
+          find "devices/$TARGET/patches" -maxdepth 1 -type f -name '*.patch' ! -name '*.revert.patch' ! -name '*.bin.patch' ! -name '*.uboot.patch' -print0 2>/dev/null \
+            | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' --no-backup-if-mismatch -p1 -F 1 -i '%'" || true
+
+      - name: 启用中文语言包 + 树内 vendor iStore（≥128M 闪存）
+        run: |
+          cd openwrt
+          # bt-r320 是 128GB eMMC，闪存远大于 128M，可以整套装：
+          #   · 打开 luci-i18n-*-zh-cn 生成（否则界面只有英文、iStore 首页被静默剔除）
+          #   · 树内 vendor iStore（feed 里的 luci-app-store 会被 kconfig 静默丢弃）
+          bash devices/common/istore-zh.sh
+
+      - name: defconfig 并校验机型
+        run: |
+          cd openwrt
+          # 树内新增的包（iStore）必须让 package 元数据重新扫描：
+          # openwrt 的 scan 结果缓存在 tmp/.packageinfo，不删会漏掉刚 vendor 进去的包，
+          # 表现为 tmp/.config-package.in 里没有 PACKAGE_luci-app-store，
+          # .config 写 =y 也会被静默丢弃
+          rm -f tmp/.packageinfo tmp/.config-package.in
+          make defconfig
+          # 注意：不能沿用全机型构建「Wireless Drivers 全置 n」的做法，
+          # 否则 bt-r320 的 kmod-mt7915e 会被关掉，开机没有 WiFi。
+          # 这里显式确保 MT7981 的 mt76 驱动与固件选上（DEVICE_PACKAGES 已声明，双保险）
+          sed -i "s/\(kmod-qca.*\)=m/\1=n/" .config
+          # 全量简体中文语言包：把这次构建里所有存在的 luci-i18n-*-zh-cn 包显式选入
+          # （依赖 LUCI_LANG 的 DEFAULT 机制容易随上游变动失效，这里改成直接枚举）
+          awk '/^config PACKAGE_luci-i18n-.+-zh-cn$/{print $2"=y"}' tmp/.config-package.in >> .config
+          {
+            echo "CONFIG_PACKAGE_kmod-mt7915e=y"
+            echo "CONFIG_PACKAGE_kmod-mt7981-firmware=y"
+            echo "CONFIG_PACKAGE_mt7981-wo-firmware=y"
+            echo "CONFIG_PACKAGE_wpad-openssl=y"
+            echo "CONFIG_PACKAGE_wireless-regdb=y"
+            echo "CONFIG_PACKAGE_luci-app-store=y"
+            echo "CONFIG_PACKAGE_luci-app-quickstart=y"
+            # kconfig 的 DEPENDS 是“要求”而非“自动选择”，依赖不满足时上面两行会被压成 n，
+            # 所以整条依赖链必须显式选入
+            echo "CONFIG_PACKAGE_luci-lib-taskd=y"
+            echo "CONFIG_PACKAGE_taskd=y"
+            echo "CONFIG_PACKAGE_luci-lua-runtime=y"
+            echo "CONFIG_PACKAGE_libuci-lua=y"
+            echo "CONFIG_PACKAGE_mount-utils=y"
+            echo "CONFIG_PACKAGE_luci-app-ttyd=y"
+            echo "CONFIG_PACKAGE_quickstart=y"
+            echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y"
+            # store 有 depends on !(PACKAGE_TAR_XZ) || PACKAGE_xz-utils：
+            # tar 被依赖带入后 TAR_XZ 默认=y，xz-utils 不装的话 store 会被压成不可见
+            echo "CONFIG_PACKAGE_xz-utils=y"
+          } >> .config
+          make defconfig
+          grep -qE '^CONFIG_PACKAGE_kmod-mt7915e=y$' .config \
+            || { echo "::error::kmod-mt7915e 未启用，开机将没有 WiFi"; exit 1; }
+
+          # 诊断：luci-app-store 的 kconfig 定义与依赖（依赖不满足时会被静默丢弃）
+          echo "===== 诊断 luci-app-store ====="
+          echo "---- tmp/.packageinfo 是否收录 ----"
+          grep -c '^Package: luci-app-store$' tmp/.packageinfo || true
+          grep -A8 '^Package: luci-app-store$' tmp/.packageinfo | head -12 || true
+          grep -n -B4 -A30 'config PACKAGE_luci-app-store$' tmp/.config-package.in | head -40 || echo "tmp/.config-package.in 里没有该符号"
+          grep -nE "TAR_XZ|LIBCURL_LDAP|PACKAGE_xz-utils|PACKAGE_tar =" tmp/.config-package.in | head -6 || true
+          echo "---- Makefile 来源 ----"
+          ls -d package/luci-app-store package/feeds/*/luci-app-store 2>/dev/null || true
+          grep -n "LUCI_DEPENDS\|LUCI_EXTRA_DEPENDS" package/luci-app-store/Makefile 2>/dev/null || true
+          echo "---- .config 中的行 ----"
+          grep -n "luci-app-store\|luci-lib-taskd\|PACKAGE_taskd" .config || true
+
+          # iStore / 中文语言包断言：这两个包都曾因 kconfig 依赖不满足被静默剔除，
+          # 构建全绿但产物里没有，必须在这里卡住
+          for s in luci-app-store luci-app-quickstart luci-i18n-base-zh-cn; do
+            grep -qE "^CONFIG_PACKAGE_${s}=y$" .config \
+              || { echo "::error::${s} 未生效（iStore 或中文包会缺失）"; exit 1; }
+          done
+          n=$(grep -cE '^CONFIG_PACKAGE_luci-i18n-.+-zh-cn=y$' .config || true)
+          [ "$n" -ge 5 ] || { echo "::error::简体中文语言包数量异常：$n"; exit 1; }
+          echo "✔ iStore 已选入，简体中文语言包 $n 个"
+
+          echo "===== 启用的机型 ====="
+          grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config
+          n=$(grep -cE '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config || true)
+          [ "$n" -eq "$MIN_DEVICES" ] || { echo "::error::机型数量应为 1，实际 $n"; exit 1; }
+          grep -q '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_globitel_bt-r320=y$' .config \
+            || { echo "::error::globitel_bt-r320 未生效"; exit 1; }
+          grep -q '^CONFIG_TARGET_mediatek_filogic=y' .config || { echo "::error::target 未生效"; exit 1; }
+
+      - name: 编译固件
+        run: |
+          set -o pipefail
+          cd openwrt
+          df -hT
+          if ! make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log; then
+            echo "::warning::并行编译失败，取错误日志"
+            grep -nE 'Error [0-9]+|error:|No rule to make target|failed to build' build.log | tail -40 || true
+            # 并行编译的输出会掩盖真正原因：定位失败包后单线程 V=s 重跑一次，把详细错误留在日志里
+            pkgs=$(grep -oE '[A-Za-z0-9_./-]+ failed to build' build.log | awk '{print $1}' | sort -u || true)
+            for pkg in $pkgs; do
+              echo "" >> build.log
+              echo "===== 详细错误（make -j1 V=s $pkg/compile）=====" >> build.log
+              timeout 2400 make -j1 V=s "$pkg/compile" 2>&1 | tail -200 | tee -a build.log || true
+            done
+            exit 1
+          fi
+          df -hT
+
+      - name: 上传编译日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            openwrt/build.log
+            openwrt/logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: 收集产物
+        id: collect
+        run: |
+          mkdir -p out
+          cp -f openwrt/bin/targets/mediatek/filogic/*bt-r320* out/ 2>/dev/null || true
+          ls -lh out || true
+          # sysupgrade.bin 是刷机主件（内核 FIT + rootfs 分区镜像打包成 tar），
+          # initramfs-kernel.bin 用于救援 / TFTP 首次引导
+          ls out/*sysupgrade.bin >/dev/null 2>&1 \
+            || { echo "::error::缺少 sysupgrade.bin"; ls out; exit 1; }
+          (cd out && sha256sum ./* > sha256sums.txt)
+          DU=$(du -sh out | cut -f1)
+          echo "size=$DU" >> "$GITHUB_OUTPUT"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: kwrt-bt-r320-images
+          path: out/
+          retention-days: 14
+
+      - name: 发布 Release
+        # push/schedule 触发时 inputs.* 为空，不能再用 inputs.make_release != false 判断
+        # （null != false 在 GH 表达式里为 false，会导致静默跳过发布）
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.make_release != false }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_PREFIX }}-${{ env.DATE }}
+          name: Kwrt Globitel BT-R320 (${{ env.DATE }})
+          body: |
+            Kwrt Globitel BT-R320 (MT7981B + eMMC) 自动编译
+
+            - 源码: openwrt/openwrt `openwrt-25.12` + Kwrt devices/common 定制
+            - 机型方案: 与 tvliving/lede 的 globitel_bt-r320 完全一致
+              （内核 FIT 独立分区 + rootfs 独立分区 + sysupgrade-tar，`root=PARTLABEL=rootfs`）
+            - 引导: **沿用机器现有 U-Boot，不刷 preloader / fip / gpt**
+            - WiFi: mt76（kmod-mt7915e）+ 2.4G/5G 双频默认开启
+            - 默认 IP: 10.0.0.1 / 用户名 root / 无密码
+            - 工作流: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            ### 刷机（与 lede 版 BT-R320 同一套 sysupgrade 包）
+
+            内核与 rootfs 分开写进各自分区，不受单个分区容量限制，
+            不会再出现 `rootfs Bad Data Hash` 掉 Web failsafe 的问题。
+
+            1. **已有系统（lede / Kwrt / OpenWrt）**：LuCI → 系统 → 备份/升级 →
+               上传 `*-sysupgrade.bin`。跨发行版升级建议**不勾选**"保留配置"。
+            2. **原厂固件 / 变砖**：先用 `*-initramfs-kernel.bin` 通过 TFTP 引导进内存系统，
+               再在 LuCI 里上传 `*-sysupgrade.bin` 正式写入。
+            3. **命令行**：`sysupgrade -n /tmp/xxx-sysupgrade.bin`
+
+            ### 附件说明
+
+            - `*-sysupgrade.bin`: 升级包（tar：内核 FIT + rootfs squashfs）
+            - `*-initramfs-kernel.bin`: 内存系统，救援 / 首次引导用
+            - `sha256sums.txt`: 校验和，刷机前核对
+          files: out/*
+          fail_on_unmatched_files: false
