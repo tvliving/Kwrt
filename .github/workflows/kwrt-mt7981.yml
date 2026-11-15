@@ -184,11 +184,39 @@ jobs:
           set -o pipefail
           cd openwrt
           df -hT
-          make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log || {
-            echo "::warning::并行编译失败，取错误日志"
-            grep -nE 'Error [0-9]+|error:|No rule to make target' build.log | tail -40 || true
-            exit 1
-          }
+          rm -f build.log
+          ok=0
+          for attempt in 1 2 3; do
+            echo "===== world 第 $attempt 轮 ====="
+            if make -j"$(( $(nproc) + 1 ))" 2>&1 | tee -a build.log; then ok=1; break; fi
+            echo "::warning::第 $attempt 轮并行编译失败，取错误日志"
+            grep -nE 'Error [0-9]+|error:|No rule to make target|failed to build' build.log | tail -40 || true
+            pkgs=$(grep -oE '[A-Za-z0-9_./-]+ failed to build' build.log | awk '{print $1}' | sort -u || true)
+            [ -n "$pkgs" ] || { echo "::error::日志里没识别出失败包"; exit 1; }
+            die=0
+            for pkg in $pkgs; do
+              # target/linux 的失败点在镜像生成阶段（target/linux/install），
+              # 重跑 compile 只会把内核再编一遍，看不到真正的报错
+              case "$pkg" in
+                target/linux) tgt="target/install" ;;
+                *) tgt="$pkg/compile" ;;
+              esac
+              echo "" >> build.log
+              echo "===== 详细错误（make -j1 V=s $tgt）=====" >> build.log
+              if timeout 3600 make -j1 V=s "$tgt" 2>&1 | tail -400 | tee -a build.log; then
+                echo "::warning::$tgt 单线程重跑成功（并行竞态），继续后续编译" | tee -a build.log
+              else
+                echo "::error::$tgt 单线程重跑仍失败" | tee -a build.log
+                die=1
+              fi
+            done
+            if [ "$die" = 1 ]; then
+              echo "===== bin/targets 现状 =====" | tee -a build.log
+              ls -lR bin/targets 2>&1 | tail -80 | tee -a build.log || true
+              exit 1
+            fi
+          done
+          [ "$ok" = 1 ] || { echo "::error::编译 3 轮后仍未成功"; exit 1; }
           df -hT
 
       - name: 上传编译日志（失败时）

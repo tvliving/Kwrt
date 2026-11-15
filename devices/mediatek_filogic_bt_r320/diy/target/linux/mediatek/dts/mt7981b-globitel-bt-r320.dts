@@ -1,26 +1,29 @@
 // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
 /*
- * Globitel BT-R320 (MT7981B + MT7531AE + 128GB eMMC)
+ * Globitel BT-R320 (MT7981B + MT7531AE + eMMC)
  *
- * 移植自 EasongChung/Actions-BT-R320-Immortalwrt-6.6 的
- * mt7981b-globitel-bt-r320-emmc.dts，按本仓库（内核 6.18 / mt7981.dtsi）的写法整理：
- *   - SoC: MediaTek MT7981B
- *   - RAM: 512MB（DTS 声明，硬件实际 1GB，沿用原方案的首启一致性）
- *   - Switch: MediaTek MT7531AE（lan1/2/3 + wan 都在 switch 上）
- *   - WiFi: MediaTek MT7976CN（mt76 / kmod-mt7915e）
- *   - Storage: eMMC（GPT 分区，rootfs 用 PARTLABEL 定位，不依赖 U-Boot 传参）
+ * 基线上游 openwrt-25.12 的 mt7981b-globitel-bt-r320.dts（内核 6.12，SoC dtsi 名为
+ * mt7981b.dtsi，eMMC 分区用 gpt-partitions / partname 写法），只改三处：
+ *   1) chosen：去掉上游的 bootargs-override="root=/dev/fit0" 与 rootdisk，
+ *      改成 root=PARTLABEL=rootfs —— 原厂/老 U-Boot 不会把 root 指到 FIT，
+ *      必须让内核自己按 eMMC 分区名找根分区（配合 sysupgrade-tar + emmc_do_upgrade）。
+ *   2) memory：声明 512MB（参考可工作的 ImmortalWrt 6.6 移植版本，宁少认不多认）。
+ *   3) 补 3 个状态灯（pio10/11/12）与 led-boot/running/failsafe/upgrade 别名。
  *
- * 与原方案的两点差异：
- *   1) switch 用本仓库统一的 &mdio_bus/&switch 写法（mt7531 phy 复位脚在 pio39）；
- *   2) gmac0 显式从 factory 0x4 取 MAC（原方案没写，会导致每次开机 MAC 随机）。
+ * 其余（MDIO 上 mt7531 复位脚 pio39、lan1/2/3 + wan、factory 分区里的
+ * eeprom@0 与 MAC 0x24/0x2a）沿用上游，不做改动。
+ *
+ * 注意：#include 必须写 mt7981b.dtsi —— 25.12 的内核 6.12 只有 mt7981b.dtsi，
+ * 没有 mt7981.dtsi（lede 的 files-6.18 才有 mt7981.dtsi），写错会 dtb 编译直接失败。
  */
+
 
 /dts-v1/;
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/leds/common.h>
 
-#include "mt7981.dtsi"
+#include "mt7981b.dtsi"
 
 / {
 	model = "Globitel BT-R320";
@@ -29,18 +32,19 @@
 	aliases {
 		serial0 = &uart0;
 		label-mac-device = &gmac0;
-		led-boot = &status_red_led;
-		led-failsafe = &status_red_led;
-		led-running = &status_green_led;
-		led-upgrade = &status_blue_led;
+		led-boot = &led_status_red;
+		led-failsafe = &led_status_red;
+		led-running = &led_status_green;
+		led-upgrade = &led_status_blue;
 	};
 
-	chosen: chosen {
-		bootargs = "root=PARTLABEL=rootfs rootwait rootfstype=squashfs,f2fs";
+	chosen {
+		bootargs = "root=PARTLABEL=rootfs rootwait rootfstype=squashfs";
 		stdout-path = "serial0:115200n8";
 	};
 
-	memory {
+	memory@40000000 {
+		device_type = "memory";
 		reg = <0 0x40000000 0 0x20000000>;
 	};
 
@@ -57,10 +61,9 @@
 	gpio-keys {
 		compatible = "gpio-keys";
 
-		button-mesh {
-			label = "mesh";
-			linux,code = <BTN_9>;
-			linux,input-type = <EV_KEY>;
+		button-wps {
+			label = "wps";
+			linux,code = <KEY_WPS_BUTTON>;
 			gpios = <&pio 0 GPIO_ACTIVE_LOW>;
 		};
 
@@ -74,17 +77,17 @@
 	gpio-leds {
 		compatible = "gpio-leds";
 
-		status_red_led: led-0 {
+		led_status_red: led-0 {
 			label = "red:status";
 			gpios = <&pio 10 GPIO_ACTIVE_LOW>;
 		};
 
-		status_green_led: led-1 {
+		led_status_green: led-1 {
 			label = "green:status";
 			gpios = <&pio 11 GPIO_ACTIVE_LOW>;
 		};
 
-		status_blue_led: led-2 {
+		led_status_blue: led-2 {
 			label = "blue:status";
 			gpios = <&pio 12 GPIO_ACTIVE_LOW>;
 		};
@@ -105,57 +108,6 @@
 	};
 };
 
-&mmc0 {
-	bus-width = <8>;
-	cap-mmc-highspeed;
-	max-frequency = <52000000>;
-	no-sd;
-	no-sdio;
-	non-removable;
-	pinctrl-names = "default", "state_uhs";
-	pinctrl-0 = <&mmc0_pins_default>;
-	pinctrl-1 = <&mmc0_pins_uhs>;
-	vmmc-supply = <&reg_3p3v>;
-	status = "okay";
-
-	card@0 {
-		compatible = "mmc-card";
-		reg = <0>;
-
-		block {
-			compatible = "block-device";
-
-			partitions {
-				block-partition-factory {
-					partname = "factory";
-
-					nvmem-layout {
-						compatible = "fixed-layout";
-						#address-cells = <1>;
-						#size-cells = <1>;
-
-						eeprom_factory_0: eeprom@0 {
-							reg = <0x0 0x1000>;
-						};
-
-						macaddr_factory_24: macaddr@24 {
-							compatible = "mac-base";
-							reg = <0x24 0x6>;
-							#nvmem-cell-cells = <1>;
-						};
-
-						macaddr_factory_2a: macaddr@2a {
-							compatible = "mac-base";
-							reg = <0x2a 0x6>;
-							#nvmem-cell-cells = <1>;
-						};
-					};
-				};
-			};
-		};
-	};
-};
-
 &eth {
 	status = "okay";
 
@@ -163,10 +115,8 @@
 		compatible = "mediatek,eth-mac";
 		reg = <0>;
 		phy-mode = "2500base-x";
-
 		nvmem-cells = <&macaddr_factory_2a 0>;
 		nvmem-cell-names = "mac-address";
-
 		fixed-link {
 			speed = <2500>;
 			full-duplex;
@@ -174,67 +124,109 @@
 		};
 	};
 
-	gmac1: mac@1 {
-		compatible = "mediatek,eth-mac";
-		reg = <1>;
-		phy-mode = "2500base-x";
-
-		fixed-link {
-			speed = <2500>;
-			full-duplex;
-			pause;
-		};
-	};
-};
-
-&mdio_bus {
-	switch: switch@1f {
-		compatible = "mediatek,mt7531";
-		reg = <31>;
-		reset-gpios = <&pio 39 GPIO_ACTIVE_LOW>;
-		interrupt-controller;
-		#interrupt-cells = <1>;
-		interrupt-parent = <&pio>;
-		interrupts = <38 IRQ_TYPE_LEVEL_HIGH>;
-	};
-};
-
-&switch {
-	ports {
+	mdio: mdio-bus {
 		#address-cells = <1>;
 		#size-cells = <0>;
 
-		port@1 {
-			reg = <1>;
-			label = "lan1";
+		switch@0 {
+			compatible = "mediatek,mt7531";
+			reg = <31>;
+			reset-gpios = <&pio 39 GPIO_ACTIVE_HIGH>;
+			interrupt-controller;
+			#interrupt-cells = <1>;
+			interrupt-parent = <&pio>;
+			interrupts = <38 IRQ_TYPE_LEVEL_HIGH>;
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@1 {
+					reg = <1>;
+					label = "lan1";
+				};
+
+				port@2 {
+					reg = <2>;
+					label = "lan2";
+				};
+
+				port@3 {
+					reg = <3>;
+					label = "lan3";
+				};
+
+				port@4 {
+					reg = <4>;
+					label = "wan";
+					nvmem-cells = <&macaddr_factory_24 0>;
+					nvmem-cell-names = "mac-address";
+				};
+
+				port@6 {
+					reg = <6>;
+					label = "cpu";
+					ethernet = <&gmac0>;
+					phy-mode = "2500base-x";
+					fixed-link {
+						speed = <2500>;
+						full-duplex;
+						pause;
+					};
+				};
+			};
 		};
+	};
+};
 
-		port@2 {
-			reg = <2>;
-			label = "lan2";
-		};
+&mmc0 {
+	status = "okay";
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc0_pins_default>;
+	pinctrl-1 = <&mmc0_pins_uhs>;
+	bus-width = <8>;
+	max-frequency = <52000000>;
+	vmmc-supply = <&reg_3p3v>;
+	cap-mmc-highspeed;
+	non-removable;
+	no-sd;
+	no-sdio;
 
-		port@3 {
-			reg = <3>;
-			label = "lan3";
-		};
+	card@0 {
+		compatible = "mmc-card";
+		reg = <0>;
 
-		port@4 {
-			reg = <4>;
-			label = "wan";
-			nvmem-cells = <&macaddr_factory_24 0>;
-			nvmem-cell-names = "mac-address";
-		};
+		partitions {
+			compatible = "gpt-partitions";
 
-		port@6 {
-			reg = <6>;
-			ethernet = <&gmac0>;
-			phy-mode = "2500base-x";
+			block-partition-factory {
+				partname = "factory";
 
-			fixed-link {
-				speed = <2500>;
-				full-duplex;
-				pause;
+				nvmem-layout {
+					compatible = "fixed-layout";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					eeprom_factory_0: eeprom@0 {
+						reg = <0x0 0x1000>;
+					};
+
+					macaddr_factory_24: macaddr@24 {
+						compatible = "mac-base";
+						reg = <0x24 0x6>;
+						#nvmem-cell-cells = <1>;
+					};
+
+					macaddr_factory_2a: macaddr@2a {
+						compatible = "mac-base";
+						reg = <0x2a 0x6>;
+						#nvmem-cell-cells = <1>;
+					};
+				};
+			};
+
+			emmc_rootdisk: block-partition-production {
+				partname = "production";
 			};
 		};
 	};
@@ -260,24 +252,18 @@
 	status = "okay";
 };
 
-&usb_phy {
-	status = "okay";
-};
-
 &watchdog {
 	status = "okay";
 };
 
 &wifi {
-	status = "okay";
 	nvmem-cells = <&eeprom_factory_0>;
 	nvmem-cell-names = "eeprom";
+	status = "okay";
+};
 
-	band@1 {
-		reg = <1>;
-		nvmem-cells = <&macaddr_factory_2a 1>;
-		nvmem-cell-names = "mac-address";
-	};
+&usb_phy {
+	status = "okay";
 };
 
 &xhci {
