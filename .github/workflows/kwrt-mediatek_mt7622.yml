@@ -196,14 +196,25 @@ jobs:
         id: collect
         run: |
           mkdir -p out
+          # 编译已结束：build_dir/staging_dir 不再需要，先腾空间。
+          # 2026-11-16 filogic 就是 cp 产物把 runner 磁盘写满 → runner 崩溃 → 整轮 failed。
+          df -h / | tail -1
+          rm -rf openwrt/build_dir openwrt/staging_dir openwrt/tmp
+          df -h / | tail -1
+          # 优先硬链接（同分区不额外占空间），失败再退回普通复制
           find openwrt/bin/targets/mediatek/mt7622 -maxdepth 1 -type f \
             \( -name '*.bin' -o -name '*.itb' -o -name '*.ubi' -o -name '*.tar' \
                -o -name '*.img' -o -name '*.gz' -o -name 'profiles.json' \
-               -o -name 'sha256sums' -o -name '*manifest' \) -exec cp -f {} out/ \;
+               -o -name 'sha256sums' -o -name '*manifest' \) -exec cp -l -f {} out/ \; 2>/dev/null || true
+          find openwrt/bin/targets/mediatek/mt7622 -maxdepth 1 -type f \
+            \( -name '*.bin' -o -name '*.itb' -o -name '*.ubi' -o -name '*.tar' \
+               -o -name '*.img' -o -name '*.gz' -o -name 'profiles.json' \
+               -o -name 'sha256sums' -o -name '*manifest' \) -exec cp -f {} out/ \; 2>/dev/null || true
           ls -lh out | head -20
           cnt=$(ls out | wc -l)
           echo "产物文件数: $cnt"
           [ "$cnt" -ge 3 ] || { echo "::error::产物为空，疑似假成功"; exit 1; }
+          df -h / | tail -1
           DU=$(du -sh out | cut -f1)
           echo "size=$DU" >> "$GITHUB_OUTPUT"
 
