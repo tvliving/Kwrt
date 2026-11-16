@@ -226,6 +226,9 @@ jobs:
           retention-days: 14
 
       - name: 发布 Release
+        id: pub
+        # 失败不判死，交给下面 gh CLI 重试（二次限流很常见）
+        continue-on-error: true
         if: ${{ github.event_name == 'schedule' || inputs.make_release != false }}
         uses: softprops/action-gh-release@v2
         with:
@@ -240,3 +243,29 @@ jobs:
             - 工作流: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           files: out/*
           fail_on_unmatched_files: false
+
+      - name: 重试上传 Release 资产（GitHub 二次限流兜底）
+        if: ${{ steps.pub.outcome == 'failure' && !cancelled() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          tag="${{ env.TAG_PREFIX }}-${{ env.DATE }}"
+          title="Kwrt MT7622 (mediatek) (${{ env.DATE }})"
+          echo ">>> 目标 tag: $tag"
+          for i in 1 2 3 4 5; do
+            echo ">>> 第 $i 次尝试上传"
+            if ! gh release view "$tag" > /dev/null 2>&1; then
+              gh release create "$tag" --title "$title" --notes "见 Actions 运行记录 ${{ github.run_id }}" || true
+            fi
+            if gh release upload "$tag" out/* --clobber; then
+              echo ">>> 上传成功（第 $i 次）"
+              exit 0
+            fi
+            echo ">>> 第 $i 次失败，$((i*30)) 秒后重试"
+            sleep $((i*30))
+          done
+          echo "::error::Release 资产上传仍失败（多为 GitHub 二次限流），产物已保留在 Actions artifact 里"
+          exit 1
