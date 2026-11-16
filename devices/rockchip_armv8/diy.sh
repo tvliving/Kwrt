@@ -9,9 +9,9 @@ sed -i 's/Os/O2/g' include/target.mk
 
 rm -rf package/boot target/linux/rockchip
 
-git_clone_path master https://github.com/coolsnowwolf/lede target/linux/rockchip package/boot package/firmware/pcat-firmware
+git_clone_path master https://github.com/coolsnowwolf/lede target/linux/rockchip package/boot
 
-git_clone_path main https://github.com/SlAlot/ImmortalWrt_Photonicat1 package/luci-app-swrt-power package/swrt-pcat-manager
+git_clone_path main https://github.com/SlAlot/ImmortalWrt_Photonicat1 package/luci-app-swrt-power package/swrt-pcat-manager  package/wlmb-server  package/luci-app-wlmbstart
 
 wget -N https://github.com/istoreos/istoreos/raw/refs/heads/istoreos-23.05/target/linux/rockchip/patches-5.15/305-r2s-pwm-fan.patch -P target/linux/rockchip/patches-6.12/
 
@@ -25,6 +25,8 @@ wget -N https://github.com/SlAlot/ImmortalWrt_Photonicat1/raw/refs/heads/main/pa
 
 wget -N https://github.com/SlAlot/ImmortalWrt_Photonicat1/raw/refs/heads/main/patches/rockchip/990-photonicat-pm-add-driver.patch -P target/linux/rockchip/patches-6.12/
 
+wget -N https://github.com/immortalwrt/immortalwrt/raw/refs/heads/master/target/linux/rockchip/armv8/base-files/etc/init.d/reload-sdio-wifi -P target/linux/rockchip/armv8/base-files/etc/init.d/
+
 sed -i "/KernelPackage,ptp/d" package/kernel/linux/modules/other.mk
 
 rm -rf target/linux/rockchip/armv8/base-files/etc/uci-defaults/13_opkg_update package/feeds/kiddin9/*_QMI_WWAN
@@ -35,9 +37,11 @@ sed -i -e 's,wpad-openssl,wpad-basic-mbedtls,g' target/linux/rockchip/image/armv
 sed -i -e '/KERNEL_TESTING_PATCHVER/d' -e 's/DEFAULT_PACKAGES +=/DEFAULT_PACKAGES += fdisk lsblk kmod-drm-rockchip luci-app-diskman/' -e 's/autocore-arm/autocore/' target/linux/rockchip/Makefile
 
 sed -i 's/Ariaboard/光影猫/' target/linux/rockchip/image/armv8.mk
-sed -i 's/\bpcat-manager\b/swrt-pcat-manager luci-app-swrt-power/g' target/linux/rockchip/image/armv8.mk
+sed -i 's/\bpcat-firmware pcat-manager\b/swrt-pcat-manager luci-app-swrt-power wlmb-server luci-app-wlmbstart ath10k-firmware-qca9377-sdio kmod-usb-net-cdc-mbim kmod-usb-net-qmi-wwan kmod-usb-serial-option uqmi/g' target/linux/rockchip/image/armv8.mk
 
-sed -i 's/6.18/6.12/' target/linux/rockchip/Makefile
+sed -i -e 's/6.18/6.12/' \
+       -e 's/ usb-modeswitch//' \
+	   target/linux/rockchip/Makefile
 
 echo "
 CONFIG_PHOTONICAT_PM=y
