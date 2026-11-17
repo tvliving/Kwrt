@@ -186,7 +186,8 @@ jobs:
           sed -i "s/\(kmod-qca.*\)=m/\1=n/" .config
           # 全量简体中文语言包：把这次构建里所有存在的 luci-i18n-*-zh-cn 包显式选入
           # 注意要补 CONFIG_ 前缀：tmp/.config-package.in 里的行是 "config PACKAGE_xxx"
-          awk '/^config PACKAGE_luci-i18n-.+-zh-cn$/{print "CONFIG_"$2"=y"}' tmp/.config-package.in >> .config
+          # 注意：.config-package.in 的 config 行带 tab 前缀，不能用 ^config 锚定
+          awk '/^[[:space:]]*config PACKAGE_luci-i18n-.+-zh-cn$/{print "CONFIG_"$2"=y"}' tmp/.config-package.in >> .config
           {
             echo "CONFIG_PACKAGE_wpad-openssl=y"
             echo "CONFIG_PACKAGE_wireless-regdb=y"
