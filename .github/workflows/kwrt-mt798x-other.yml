@@ -180,6 +180,9 @@ jobs:
           # 表现为 tmp/.config-package.in 里没有 PACKAGE_luci-app-store，
           # .config 写 =y 也会被静默丢弃
           rm -f tmp/.packageinfo tmp/.config-package.in
+          # 语言开关：luci.mk 里 luci-i18n-*-zh-cn 的 DEFAULT:=LUCI_LANG_zh_Hans，
+          # 不设这个开关，枚举的 zh-cn =y 会被 default 压成 n（zh 数量归 0）
+          echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
           make defconfig
           # common/.config 带 CONFIG_TARGET_ALL_PROFILES=y（Kwrt 全量构建用），
           # defconfig 会展开 filogic 全部 182 个 profile。只追加 "# ... is not set"

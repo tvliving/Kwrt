@@ -190,7 +190,7 @@ jobs:
           sed -i "s/\(kmod-qca.*\)=m/\1=n/" .config
           # 全量简体中文语言包：把这次构建里所有存在的 luci-i18n-*-zh-cn 包显式选入
           # （依赖 LUCI_LANG 的 DEFAULT 机制容易随上游变动失效，这里改成直接枚举）
-          awk '/^config PACKAGE_luci-i18n-.+-zh-cn$/{print $2"=y"}' tmp/.config-package.in >> .config
+          awk '/^[[:space:]]*config PACKAGE_luci-i18n-.+-zh-cn$/{print "CONFIG_"$2"=y"}' tmp/.config-package.in >> .config
           {
             echo "CONFIG_PACKAGE_kmod-mt7915e=y"
             echo "CONFIG_PACKAGE_kmod-mt7981-firmware=y"
@@ -213,6 +213,9 @@ jobs:
             # tar 被依赖带入后 TAR_XZ 默认=y，xz-utils 不装的话 store 会被压成不可见
             echo "CONFIG_PACKAGE_xz-utils=y"
           } >> .config
+          # 语言开关：luci.mk 里 luci-i18n-*-zh-cn 的 DEFAULT:=LUCI_LANG_zh_Hans，
+          # 不设这个开关，枚举的 zh-cn =y 会被 default 压成 n（zh 数量归 0）
+          echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
           make defconfig
           grep -qE '^CONFIG_PACKAGE_kmod-mt7915e=y$' .config \
             || { echo "::error::kmod-mt7915e 未启用，开机将没有 WiFi"; exit 1; }
