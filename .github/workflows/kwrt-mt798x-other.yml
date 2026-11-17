@@ -146,6 +146,7 @@ jobs:
                    mt7986a-hf-m7986r1-emmc mt7986a-hf-m7986r1-nand mt7986a-hf-m7986r1.dtsi \
                    mt7986a-jdcloud-re-cs-05 mt7988a-tplink-tl-7dr7299-v1; do
             [ -f "target/linux/mediatek/dts/$d.dts" ] || [ -f "target/linux/mediatek/dts/$d.dtso" ] \
+              || [ -f "target/linux/mediatek/dts/$d.dtsi" ] \
               || { echo "::error::DTS 缺失: $d"; exit 1; }
           done
           grep -q 'include "mt7981b.dtsi"' target/linux/mediatek/dts/mt7981b-cmcc-rax3000m-lede.dts \
