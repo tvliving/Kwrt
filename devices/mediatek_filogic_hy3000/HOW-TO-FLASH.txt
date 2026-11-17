@@ -1,0 +1,43 @@
+HY3000 刷机说明（选错通道会变砖，务必按下面选文件）
+====================================================
+
+【本包不含 BL2 / preloader / fip / gpt】
+  包内只有：内核 FIT + rootfs squashfs（打包成 tar）、以及内存系统 initramfs。
+  系统内升级只会按 GPT 分区名写 kernel / rootfs 两个分区，
+  物理上碰不到 BL2（boot0/引导区）和 U-Boot(fip)。
+
+
+通道 A｜机器还能进系统（Kwrt / lede / iStoreOS / OpenWrt）
+--------------------------------------------------------
+  LuCI → 系统 → 备份/升级 → 上传 *-sysupgrade.bin
+  （跨发行版升级不要勾"保留配置"）
+  命令行：sysupgrade -n /tmp/xxx-sysupgrade.bin
+
+
+通道 B｜原厂固件 / 系统进不去，但 U-Boot 还能跑
+--------------------------------------------------------
+  用 TFTP 把 *-initramfs-kernel.bin 载入内存引导，起来后再走通道 A：
+
+    setenv ipaddr 192.168.1.2
+    setenv serverip 192.168.1.1
+    tftpboot 0x46000000 kwrt-mediatek-filogic-philips_hy3000-initramfs-kernel.bin
+    bootm 0x46000000
+
+  ✖ 绝对不要做的事（2026-11-16 变砖的真实原因）：
+    在 U-Boot「网页恢复 / 固件升级」页面上传 *-sysupgrade.bin。
+    它是 tar 归档，不是能从分区直接引导的镜像；网页恢复按固定偏移整段写入，
+    60MB+ 一写就盖住引导区（BL2 / fip），表现就是开机报 "BL2 异常"、彻底不启动。
+
+
+通道 C｜BL2 已经坏了（串口全无输出，或 BL2 报 DDR / load image 失败）
+--------------------------------------------------------
+  只能走 UART：mtk_uartboot 载入 preloader(BL2，MT7981 emmc-ddr4) + fip 进 U-Boot，
+  再把 BL2 / fip 写回 eMMC，最后按通道 B 恢复系统。
+
+  preloader 必须与本机 DDR 类型匹配（本机为 DDR4），不要跨机型、跨批次混用；
+  写回前先备份 eMMC 的 boot0（BL2 所在）与 fip 分区，避免二次伤害。
+
+
+校验
+--------------------------------------------------------
+  sha256sum -c sha256sums.txt

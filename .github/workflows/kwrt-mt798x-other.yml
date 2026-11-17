@@ -185,7 +185,8 @@ jobs:
           # 否则 mt7915e/mt7921e/mt7992 会被关掉，开机没有 WiFi
           sed -i "s/\(kmod-qca.*\)=m/\1=n/" .config
           # 全量简体中文语言包：把这次构建里所有存在的 luci-i18n-*-zh-cn 包显式选入
-          awk '/^config PACKAGE_luci-i18n-.+-zh-cn$/{print $2"=y"}' tmp/.config-package.in >> .config
+          # 注意要补 CONFIG_ 前缀：tmp/.config-package.in 里的行是 "config PACKAGE_xxx"
+          awk '/^config PACKAGE_luci-i18n-.+-zh-cn$/{print "CONFIG_"$2"=y"}' tmp/.config-package.in >> .config
           {
             echo "CONFIG_PACKAGE_wpad-openssl=y"
             echo "CONFIG_PACKAGE_wireless-regdb=y"
@@ -223,10 +224,11 @@ jobs:
           grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config
           n=$(grep -cE '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config || true)
           [ "$n" -eq "$MIN_DEVICES" ] || { echo "::error::机型数量应为 $MIN_DEVICES，实际 $n"; exit 1; }
-          # 白名单逐一核查
+          # 白名单逐一核查（注意：设备 profile 符号保留连字符，如 cetron_ct3003-mod，
+          # 绝不能把 '-' 换成 '_'，否则符号不存在被 defconfig 静默丢弃）
           miss=""
           for d in $DEVICES; do
-            sym="CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_$(echo "$d" | tr 'a-z-' 'A-Z_')=y"
+            sym="CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${d}=y"
             grep -q "^${sym}$" .config || miss="$miss $d"
           done
           [ -z "$miss" ] || { echo "::error::机型未生效：$miss"; exit 1; }
