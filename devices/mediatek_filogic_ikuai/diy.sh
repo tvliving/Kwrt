@@ -74,7 +74,7 @@ define Device/ikuai_q6000-emmc
   DEVICE_DTS_DIR := ../dts
   DEVICE_PACKAGES := kmod-mt7915e kmod-mt7986-firmware mt7986-wo-firmware kmod-mtd-rw \\
 \tcoremark blkid blockdev fdisk f2fsck mkf2fs kmod-mmc \\
-\tluci-app-ksmbd luci-i18n-ksmbd-zh-cn ksmbd-utils
+\tluci-app-ksmbd luci-i18n-ksmbd-zh-cn ksmbd-server
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
 endef
 TARGET_DEVICES += ikuai_q6000-emmc
