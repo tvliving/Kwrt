@@ -162,6 +162,28 @@ jobs:
           # .config 写 =y 也会被静默丢弃
           rm -f tmp/.packageinfo tmp/.config-package.in
           make defconfig
+          # common/.config 带 CONFIG_TARGET_ALL_PROFILES=y（Kwrt 全量构建用），
+          # defconfig 会展开 filogic 全部 182 个 profile。只追加 "# ... is not set"
+          # 是无效的——已有的 "=y" 行先生效。必须整行删除非白名单 DEVICE 赋值
+          # 再统一追加 n（模式来自 kwrt-mediatek_filogic.yml 的 SMALL_DEVICES
+          # 排除段，2026-11 实证有效）。
+          python3 - <<'PYEOF'
+          import sys
+          keep_syms = {"CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_philips_hy3000"}
+          off = []
+          keep = []
+          for line in open(".config", encoding="utf-8", errors="surrogateescape"):
+              name = line.split("=")[0].replace("# ", "").split(" ")[0]
+              if name.startswith("CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_"):
+                  if name not in keep_syms:
+                      off.append(name)
+                      continue
+              keep.append(line)
+          for s2 in off:
+              keep.append("# %s is not set" % s2 + "\n")
+          open(".config", "w", encoding="utf-8", errors="surrogateescape").writelines(keep)
+          print("已关闭白名单外机型: %d 个" % len(off))
+          PYEOF
           # 注意：不能沿用全机型构建「Wireless Drivers 全置 n」的做法，
           # 否则 hy3000 的 kmod-mt7915e 会被关掉，开机没有 WiFi。
           # 这里显式确保 MT7981 的 mt76 驱动与固件选上（DEVICE_PACKAGES 已声明，双保险）
