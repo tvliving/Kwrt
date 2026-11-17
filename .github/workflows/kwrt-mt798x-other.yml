@@ -360,7 +360,7 @@ jobs:
           for d in cetron_ct3003-mod clx_s20l cmcc_a10-mod cmcc_rax3000me-emmc cmcc_rax3000me-nand \
                    cmcc_xr30-emmc cmcc_xr30-nand cudy_tr3000-mod fzs_5gcpe-p3 hf_m7986r1-emmc \
                    hf_m7986r1-nand huasifei_ws3006 huasifei_ws3009 jdcloud_re-cs-05 tplink_tl-7dr7299-v1; do
-            ls out/"*$d*-sysupgrade."* >/dev/null 2>&1 || miss="$miss $d"
+            ls out/*"$d"*-sysupgrade.* >/dev/null 2>&1 || miss="$miss $d"
           done
           [ -z "$miss" ] || { echo "::error::以下机型缺 sysupgrade 产物：$miss"; ls out; exit 1; }
           # 引导工件硬性拒绝：出现 preloader/bl31/gpt 一律中止发布（防误刷变砖）

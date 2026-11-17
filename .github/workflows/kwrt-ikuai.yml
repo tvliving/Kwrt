@@ -318,7 +318,7 @@ jobs:
           # 3 个机型每个都必须有 sysupgrade 产物
           miss=""
           for d in ikuai_q3000 ikuai_q6000 ikuai_q6000-emmc; do
-            ls out/"*$d*-sysupgrade."* >/dev/null 2>&1 || miss="$miss $d"
+            ls out/*"$d"*-sysupgrade.* >/dev/null 2>&1 || miss="$miss $d"
           done
           [ -z "$miss" ] || { echo "::error::以下机型缺 sysupgrade 产物：$miss"; ls out; exit 1; }
           # 引导工件硬性拒绝（防误刷变砖）
