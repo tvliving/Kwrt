@@ -80,10 +80,13 @@ endef
 TARGET_DEVICES += ikuai_q6000-emmc
 
 '''
-    a = 'endif\n'
-    idx = s.rfind(a)
-    assert idx > 0, 'filogic.mk 结尾锚点缺失'
-    s = s[:idx] + block + s[idx:]
+    # 注意：不能 rfind('endif') 插入！filogic.mk 末尾是 zyxel_wx5600 块内的
+    # ifneq ($(CONFIG_TARGET_ROOTFS_INITRAMFS),) 条件，rfind 会插进条件块内部，
+    # 普通构建整段被跳过（x-wrt run 44012827769 实证 15 != 18）。必须追加到
+    # 文件真正末尾（顶层作用域）。
+    if not s.endswith('\n'):
+        s += '\n'
+    s = s.rstrip('\n') + '\n\n' + block.rstrip('\n') + '\n'
     save(p, s)
     print('filogic.mk: 已追加 3 个 ikuai 设备块')
 else:
