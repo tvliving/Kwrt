@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+
+/dts-v1/;
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+
+#include "mt7981b-tplink-wma301-common.dtsi"
+
+/ {
+	model = "TP-Link WMA301 (OpenWrt U-Boot layout)";
+	compatible = "tplink,wma301-ubootmod", "mediatek,mt7981";
+};
+
+&chosen {
+	bootargs = "root=/dev/fit0 rootwait";
+	rootdisk = <&ubi_rootdisk>;
+};
+
+&partitions {
+	partition@580000 {
+		label = "ubi";
+		compatible = "linux,ubi";
+		reg = <0x0580000 0x7a80000>;
+		volumes {
+			ubi_rootdisk: ubi-volume-fit {
+				volname = "fit";
+			};
+
+			ubi_ubootenv: ubi-volume-ubootenv {
+				volname = "ubootenv";
+			};
+
+			ubi_ubootenv2: ubi-volume-ubootenv2 {
+				volname = "ubootenv2";
+			};
+		};
+	};
+};
+
+&ubi_ubootenv {
+	nvmem-layout {
+		compatible = "u-boot,env-redundant-bool";
+	};
+};
+
+&ubi_ubootenv2 {
+	nvmem-layout {
+		compatible = "u-boot,env-redundant-bool";
+	};
+};
