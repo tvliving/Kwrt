@@ -29,6 +29,6 @@
 -  IMAGE/emmc.img := boot-script onecloud | emmc-common $$(DEVICE_NAME)
 -  IMAGE/emmc.img.gz := $$(IMAGE/emmc.img) | gzip
 +  IMAGE/emmc_burn.img := boot-script onecloud | emmc-common $$(DEVICE_NAME) | run-host-script
-+  IMAGE/emmc_burn.img.gz := $$(IMAGE/emmc.img) | gzip
++  IMAGE/emmc_burn.img.gz := $$(IMAGE/emmc_burn.img) | gzip
  endef
  TARGET_DEVICES += thunder-onecloud
