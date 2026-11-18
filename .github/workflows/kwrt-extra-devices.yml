@@ -164,6 +164,17 @@ jobs:
             echo "feeds 中无 luci-theme-vantage，从 anothaDev 仓库补齐"
             git clone --depth 1 https://github.com/anothaDev/luci-theme-vantage package/luci-theme-vantage
           fi
+          # 默认展开侧栏：vantage 的 data-rail="pinned" 必须加在 <html> 标签上
+          # （CSS 用 html[data-rail=pinned] 匹配，menu-vantage.js 里 this.root 就是
+          #  documentElement；加到 nav 上是无效的）。这样左侧就是「图标 + 菜单文字」。
+          for f in feeds/luci/themes/luci-theme-vantage/ucode/template/themes/vantage/header.ut \
+                   package/feeds/luci/luci-theme-vantage/ucode/template/themes/vantage/header.ut \
+                   package/luci-theme-vantage/ucode/template/themes/vantage/header.ut; do
+            if [ -f "$f" ]; then
+              sed -i 's|<html |<html data-rail="pinned" |' "$f"
+              echo "已默认展开侧栏: $f"
+            fi
+          done
           mkdir -p package/base-files/files/etc/uci-defaults
           cat > package/base-files/files/etc/uci-defaults/95-luci-theme-vantage <<'EOF'
           #!/bin/sh
