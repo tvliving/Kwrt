@@ -97,6 +97,31 @@ jobs:
 
       - name: 载入 Kwrt 定制（common diy.sh）
         run: |
+          # common/diy.sh 里的 git_clone_path 由 Kwrt 上游外层脚本注入，直接 bash 执行
+          # 会 command not found：openssl / ppp 已被 rm 掉却克隆不回来，最终 curl 报
+          # "…/staging_dir/…/usr is a bad --with-openssl prefix!"。这里必须内联定义并
+          # export -f（export -f 的函数能被子 bash 进程继承）。
+          function git_clone_path() {
+            trap 'rm -rf "$tmpdir"' EXIT
+            branch="$1" rurl="$2" mv="$3"
+            [[ "$mv" != "mv" ]] && shift 2 || shift 3
+            rootdir="$PWD"
+            tmpdir="$(mktemp -d)" || exit 1
+            if [ ${#branch} -lt 10 ]; then
+              git clone -b "$branch" --depth 1 --filter=blob:none --sparse "$rurl" "$tmpdir"
+              cd "$tmpdir"
+            else
+              git clone --filter=blob:none --sparse "$rurl" "$tmpdir"
+              cd "$tmpdir"
+              git checkout $branch
+            fi
+            git sparse-checkout init --cone
+            git sparse-checkout set $@
+            [[ "$mv" != "mv" ]] && cp -rn ./* $rootdir/ || mv -n $@/* $rootdir/$@/
+            cd $rootdir
+          }
+          export -f git_clone_path
+          export REPO_TOKEN="${{ secrets.KWRT_TOKEN }}"
           mkdir -p openwrt
           cp -rf devices/common/. openwrt/
           cp -rf "devices/$TARGET/." openwrt/
@@ -104,6 +129,11 @@ jobs:
           cd openwrt
           chmod +x devices/common/diy.sh
           /bin/bash devices/common/diy.sh
+          # 关键依赖落位核查：diy.sh 先 rm 再从 immortalwrt 克隆，克隆失败必须立刻停
+          for p in package/libs/openssl package/network/services/ppp; do
+            [ -d "$p" ] || { echo "::error::$p 缺失（common/diy.sh 的 git_clone_path 未生效）"; exit 1; }
+          done
+          echo "openssl / ppp 已从 immortalwrt openwrt-25.12 克隆完成"
 
       - name: 注入移植机型（diy.sh + diy 覆盖）
         run: |
