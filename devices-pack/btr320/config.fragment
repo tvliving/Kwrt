@@ -1,1 +1,2 @@
+CONFIG_TARGET_MULTI_PROFILE=y
 CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_globitel_bt-r320=y

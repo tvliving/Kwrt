@@ -80,8 +80,19 @@ jobs:
         if: steps.pick.outputs.selected != 'false'
         run: |
           python3 scripts/apply-pack.py openwrt "${{ matrix.slug }}"
-          grep -n "Device/" openwrt/target/linux/mediatek/image/filogic.mk | tail -5
-          ls openwrt/target/linux/mediatek/dts/ | grep -E "x30e|x60-new|sl-3000"
+          grep -c "define Device/" openwrt/target/linux/mediatek/image/filogic.mk
+          ls openwrt/target/linux/mediatek/dts/ | grep -E "x30e|x60-new|sl-3000|bt-r320"
+
+      - name: 生成基础 .config
+        if: steps.pick.outputs.selected != 'false'
+        run: |
+          cd openwrt
+          {
+            echo 'CONFIG_TARGET_mediatek=y'
+            echo 'CONFIG_TARGET_mediatek_filogic=y'
+            cat ../devices-pack/"${{ matrix.slug }}"/config.fragment
+          } > .config
+          echo "---- 基础配置 ----"; cat .config
 
       - name: 主题 / iStore / 中文包
         if: steps.pick.outputs.selected != 'false'
@@ -89,27 +100,18 @@ jobs:
           cd openwrt
           bash ../scripts/customize.sh .
 
-      - name: 生成 .config 并校验机型
+      - name: 校验机型与主题并 defconfig
         if: steps.pick.outputs.selected != 'false'
         run: |
           cd openwrt
-          {
-            echo 'CONFIG_TARGET_mediatek=y'
-            echo 'CONFIG_TARGET_mediatek_filogic=y'
-            # Target Devices 菜单 depends on TARGET_MULTI_PROFILE，
-            # 不开这一项时 CONFIG_TARGET_DEVICE_<conf>_DEVICE_<dev> 全部不可见，会被 defconfig 丢弃
-            echo 'CONFIG_TARGET_MULTI_PROFILE=y'
-            cat ../devices-pack/"${{ matrix.slug }}"/config.fragment
-          } > .config
           make defconfig
-          cat ../devices-pack/"${{ matrix.slug }}"/config.fragment >> .config
-          echo 'CONFIG_PACKAGE_luci-theme-vantage=y' >> .config
-          echo 'CONFIG_LUCI_LANG_zh_Hans=y' >> .config
-          make defconfig
-          grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config
+          echo "---- 机型 ----"
+          grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config || {
+            echo "::error::机型未生效，检查 filogic.mk 是否含对应 Device 定义"; exit 1; }
           grep -q '^CONFIG_PACKAGE_luci-theme-vantage=y$' .config || { echo "::error::vantage 主题未生效"; exit 1; }
-          grep -q '^CONFIG_PACKAGE_luci-theme-argon=y$' .config && { echo "::error::argon 仍在配置中"; exit 1; }
-          true
+          if grep -q '^CONFIG_PACKAGE_luci-theme-argon=y$' .config; then echo "::error::argon 仍在配置中"; exit 1; fi
+          echo "---- 中文/商店 ----"
+          grep -E '^CONFIG_(LUCI_LANG_zh_Hans|PACKAGE_luci-app-store)' .config || true
 
       - name: 编译
         if: steps.pick.outputs.selected != 'false'
