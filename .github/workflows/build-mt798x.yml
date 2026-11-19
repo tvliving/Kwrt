@@ -127,25 +127,15 @@ jobs:
       - name: 编译
         if: steps.pick.outputs.selected != 'false'
         run: |
-          set -o pipefail
           cd openwrt
-          rc=0
-          make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log || rc=${PIPESTATUS[0]}
-          if [ "$rc" -ne 0 ]; then
-            # 并行 make 在多机型/多镜像同时打包时会给出「零输出」失败：日志里
-            # make[3] -C target/linux install 之后直接 "ERROR: target/linux failed to
-            # build."，没有任何 *** Error 行，无法定位。串行 -j1 能拿到真实错误，
-            # 且若串行整树重建通过，说明固件确实编得出来（产物由后续收集/上传步骤核对）。
-            echo "::warning::并行编译失败（rc=$rc），改用整树 -j1 V=s 串行重建"
-            rc2=0
-            make -j1 V=s 2>&1 | tee -a build.log || rc2=$?
-            if [ "$rc2" -eq 0 ]; then
-              echo "::warning::并行失败但整树 -j1 V=s 串行重建全部通过 → 判定为并行打包镜像阶段竞态，构建有效，继续"
-            else
-              echo "::error::串行重建同样失败（rc=$rc2），build.log 尾部 120 行："
-              tail -n 120 build.log || true
-              exit 1
-            fi
+          set -o pipefail
+          if make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log; then
+            echo "编译成功"
+          else
+            echo "::warning::并行编译失败，串行重跑 target/linux 以输出真实错误"
+            make target/linux/install V=s 2>&1 | tail -150 || true
+            echo "::error::target/linux 镜像阶段失败，错误见上方日志"
+            exit 1
           fi
 
       - name: 收集产物
