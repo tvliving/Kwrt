@@ -163,10 +163,28 @@ jobs:
           fi
 
           echo "===== 启用的机型数 ====="
-          n=$(grep -cE '^CONFIG_TARGET_DEVICE_amlogic_meson8b_DEVICE_.*=y$' .config || true)
-          echo "启用机型: $n（下限 $MIN_DEVICES）"
-          grep -E '^CONFIG_TARGET_DEVICE_amlogic_meson8b_DEVICE_.*=y$' .config | head -5
-          [ "$n" -ge "$MIN_DEVICES" ] || { echo "::error::机型数量不足，实际 $n"; exit 1; }
+          # 25.12 同时存在两套设备符号：多机型(MULTI_PROFILE)的
+          # CONFIG_TARGET_DEVICE_<conf>_DEVICE_<dev> 与单选 choice 的
+          # CONFIG_TARGET_<conf>_DEVICE_<dev>，defconfig 只保留其中一套，两套都算
+          old_n=$(grep -cE '^CONFIG_TARGET_DEVICE_amlogic_meson8b_DEVICE_.*=y$' .config || true)
+          new_n=$(grep -cE '^CONFIG_TARGET_amlogic_meson8b_DEVICE_.*=y$' .config || true)
+          echo "启用机型: 旧式 $old_n / 新式 $new_n（下限 $MIN_DEVICES）"
+          grep -E '^CONFIG_TARGET_(DEVICE_)?amlogic_meson8b_DEVICE_.*=y$' .config | head -10 || true
+          if [ "$old_n" -ge "$new_n" ]; then n=$old_n; else n=$new_n; fi
+          if [ "$n" -lt "$MIN_DEVICES" ]; then
+            echo "::group::机型未启用，打印现场"
+            echo "--- target/linux/amlogic ---"; ls -1 target/linux/amlogic || true
+            echo "--- target/linux/amlogic/meson8b ---"; ls -1 target/linux/amlogic/meson8b || true
+            echo "--- amlogic/Makefile 关键行 ---"
+            grep -nE 'KERNEL_PATCHVER|KERNEL_TESTING_PATCHVER|SUBTARGETS' target/linux/amlogic/Makefile || true
+            echo "--- .config 里的 amlogic 符号 ---"
+            grep -nE '^(# )?CONFIG_TARGET_(DEVICE_)?amlogic' .config | head -20 || true
+            echo "--- meson8b.mk 设备定义 ---"
+            grep -nE 'define Device/|TARGET_DEVICES' target/linux/amlogic/image/meson8b.mk || true
+            echo "::endgroup::"
+            echo "::error::机型数量不足，实际 0"
+            exit 1
+          fi
           grep -q '^CONFIG_TARGET_amlogic_meson8b=y' .config || { echo "::error::target 未生效"; exit 1; }
 
       - name: 编译固件
