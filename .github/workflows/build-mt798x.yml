@@ -1,0 +1,146 @@
+# Kwrt 多机型编译：SL-3000 / SL-3000 eMMC、Ruijie RG-X30E、Ruijie RG-X30E Pro、Ruijie RG-X60 New、Globitel BT-R320
+# 每日 09:00（北京时间，UTC+8）定时构建，产物发布到 Release
+name: Build Kwrt MT798x
+
+on:
+  schedule:
+    # 每周一至周日 09:00（北京时间）→ UTC 01:00
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: '机型（all = 全部）'
+        required: false
+        default: 'all'
+  push:
+    paths:
+      - 'devices-pack/**'
+      - 'scripts/**'
+      - '.github/workflows/build-mt798x.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: Kwrt-${{ github.ref }}-${{ matrix.slug }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        slug: [sl3000, rgx30e, x30epro, x60new, btr320]
+    steps:
+      - name: 检出构建仓库
+        uses: actions/checkout@v4
+
+      - name: 过滤手动选择机型
+        id: pick
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.slug != 'all' && inputs.slug != matrix.slug }}
+        run: echo "selected=false" >> "$GITHUB_OUTPUT"
+
+      - name: 释放磁盘空间
+        if: steps.pick.outputs.selected != 'false'
+        uses: coder-xiaomo/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: 安装依赖
+        if: steps.pick.outputs.selected != 'false'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget dwarves \
+            llvm python3-pyelftools libpython3-dev aria2 jq ccache rename \
+            libelf-dev device-tree-compiler libgmp3-dev libmpc-dev
+          sudo timedatectl set-timezone "Asia/Shanghai"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+      - name: 准备源码树
+        if: steps.pick.outputs.selected != 'false'
+        run: |
+          git clone -q --depth 1 -b "openwrt-25.12" https://github.com/openwrt/openwrt openwrt
+          echo "已克隆上游 https://github.com/openwrt/openwrt"
+
+      - name: 注入设备包
+        if: steps.pick.outputs.selected != 'false'
+        run: |
+          python3 scripts/apply-pack.py openwrt "${{ matrix.slug }}"
+          grep -n "Device/" openwrt/target/linux/mediatek/image/filogic.mk | tail -5
+          ls openwrt/target/linux/mediatek/dts/ | grep -E "x30e|x60-new|sl-3000"
+
+      - name: 主题 / iStore / 中文包
+        if: steps.pick.outputs.selected != 'false'
+        run: |
+          cd openwrt
+          bash ../scripts/customize.sh .
+
+      - name: 生成 .config 并校验机型
+        if: steps.pick.outputs.selected != 'false'
+        run: |
+          cd openwrt
+          {
+            echo 'CONFIG_TARGET_mediatek=y'
+            echo 'CONFIG_TARGET_mediatek_filogic=y'
+            cat ../devices-pack/"${{ matrix.slug }}"/config.fragment
+          } > .config
+          make defconfig
+          cat ../devices-pack/"${{ matrix.slug }}"/config.fragment >> .config
+          echo 'CONFIG_PACKAGE_luci-theme-vantage=y' >> .config
+          echo 'CONFIG_LUCI_LANG_zh_Hans=y' >> .config
+          make defconfig
+          grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config
+          grep -q '^CONFIG_PACKAGE_luci-theme-vantage=y$' .config || { echo "::error::vantage 主题未生效"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_luci-theme-argon=y$' .config && { echo "::error::argon 仍在配置中"; exit 1; }
+          true
+
+      - name: 编译
+        if: steps.pick.outputs.selected != 'false'
+        run: |
+          set -o pipefail
+          cd openwrt
+          make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log
+
+      - name: 收集产物
+        if: steps.pick.outputs.selected != 'false'
+        run: |
+          mkdir -p out
+          cp -f openwrt/bin/targets/mediatek/filogic/*sysupgrade* out/ 2>/dev/null || true
+          (cd out && sha256sum ./* > sha256sums.txt) 2>/dev/null || true
+          ls -lh out
+
+      - name: 上传 artifact
+        if: steps.pick.outputs.selected != 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kwrt-${{ matrix.slug }}
+          path: out/
+          retention-days: 14
+
+      - name: 发布 Release
+        if: steps.pick.outputs.selected != 'false' && success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ matrix.slug }}-${{ github.run_number }}
+          name: Kwrt ${{ matrix.slug }} build ${{ github.run_number }}
+          body: |
+            自动构建：Kwrt / ${{ matrix.slug }}
+            - 定时：每天 09:00（北京时间）
+            - 主题：luci-theme-vantage（已移除 argon）
+            - 内置：iStore 软件中心 + 简体中文语言包
+            - 运行记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          files: out/*
+          fail_on_unmatched_files: false

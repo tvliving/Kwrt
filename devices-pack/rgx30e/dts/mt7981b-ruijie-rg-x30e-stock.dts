@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+/*
+ * Ruijie RG-X30E - 原厂分区布局（保留原厂 u-boot / ubi2 备份分区）
+ * ubi 分区 0x2280000 = 34.5MB，不需要刷第三方 u-boot，风险最低。
+ */
+
+/dts-v1/;
+#include "mt7981b-ruijie-rg-x30e.dtsi"
+
+/ {
+	model = "Ruijie RG-X30E (stock layout)";
+	compatible = "ruijie,rg-x30e-stock", "mediatek,mt7981";
+};
+
+&partitions {
+	partition@880000 {
+		label = "ubi";
+		reg = <0x880000 0x2280000>;
+		compatible = "linux,ubi";
+	};
+
+	partition@2b00000 {
+		label = "ubi2";
+		reg = <0x2b00000 0x2280000>;
+	};
+
+	partition@4d80000 {
+		label = "backup";
+		reg = <0x4d80000 0x2a80000>;
+	};
+};

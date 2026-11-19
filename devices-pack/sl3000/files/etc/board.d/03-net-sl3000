@@ -1,0 +1,14 @@
+#!/bin/sh
+# SL-3000 / SL-3000 eMMC 网口映射（board.d，排序在 02_network 之后执行）
+. /lib/functions.sh
+. /lib/functions/uci-defaults.sh
+
+board_config_update
+case "$(board_name)" in
+sl,3000|sl,3000-emmc)
+	ucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "wan"
+	;;
+esac
+board_config_flush
+
+exit 0

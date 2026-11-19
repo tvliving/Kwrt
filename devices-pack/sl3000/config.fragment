@@ -1,0 +1,2 @@
+CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_sl_3000=y
+CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_sl_3000-emmc=y

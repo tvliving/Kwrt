@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+
+/dts-v1/;
+
+#include "mt7981b-ruijie-rg-x30e-pro-ubi.dts"
+
+&chosen {
+	/delete-property/ rootdisk;
+	/delete-property/ bootargs;
+};
+
+&gmac0 {
+	/delete-property/ nvmem-cells;
+	/delete-property/ nvmem-cell-names;
+};
+
+&ports {
+	port@0 {
+		/delete-property/ nvmem-cells;
+		/delete-property/ nvmem-cell-names;
+	};
+};
+
+&wifi {
+	/delete-property/ #address-cells;
+	/delete-property/ #size-cells;
+	/delete-node/ band@0;
+	/delete-node/ band@1;
+};
+
+&partitions {
+	partition@0 { /* bl2 */
+		/delete-property/ read-only;
+	};
+
+	partition@100000 { /* u-boot-env */
+		/delete-property/ read-only;
+	};
+
+	partition@180000 { /* Factory */
+		/delete-property/ read-only;
+	};
+
+	partition@380000 { /* fip */
+		/delete-property/ read-only;
+	};
+
+	partition@580000 { /* fip2 */
+		/delete-property/ read-only;
+	};
+
+	partition@780000 { /* product_info */
+		/delete-property/ read-only;
+	};
+
+	partition@800000 { /* kdump */
+		/delete-property/ read-only;
+	};
+};

@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+
+/dts-v1/;
+#include "mt7981b-ruijie-rg-x30e-pro.dts"
+
+/ {
+	model = "Ruijie RG-X30E Pro (OpenWrt U-Boot layout)";
+	compatible = "ruijie,rg-x30e-pro-ubootmod", "mediatek,mt7986a";
+
+	chosen {
+		rootdisk = <&ubi_rootdisk>;
+		bootargs = "root=/dev/fit0 rootwait";
+	};
+};
+
+&spi_nand {
+	/delete-property/ mediatek,nmbm;
+	/delete-property/ mediatek,bmt-max-ratio;
+	/delete-property/ mediatek,bmt-max-reserved-blocks;
+};
+
+&mtd_ubi {
+	compatible = "linux,ubi";
+	reg = <0x880000 0x0>;
+
+	volumes {
+		ubi_rootdisk: ubi-volume-fit {
+			volname = "fit";
+		};
+	};
+};

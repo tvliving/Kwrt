@@ -1,0 +1,14 @@
+#!/bin/sh
+# Ruijie RG-X60 New 网口映射（board.d，排序在 02_network 之后执行）
+. /lib/functions.sh
+. /lib/functions/uci-defaults.sh
+
+board_config_update
+case "$(board_name)" in
+ruijie,rg-x60-new-ubi)
+	ucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "eth1"
+	;;
+esac
+board_config_flush
+
+exit 0

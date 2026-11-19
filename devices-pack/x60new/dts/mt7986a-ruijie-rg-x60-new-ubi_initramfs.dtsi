@@ -1,0 +1,48 @@
+
+&{/chosen} {
+	/delete-property/ rootdisk;
+	/delete-property/ bootargs;
+};
+
+&{/soc/ethernet@15100000/mac@0} {
+	/delete-property/ nvmem-cells;
+	/delete-property/ nvmem-cell-names;
+};
+
+&{/soc/ethernet@15100000/mac@1} {
+	/delete-property/ nvmem-cells;
+	/delete-property/ nvmem-cell-names;
+};
+
+&{/soc/wifi@18000000} {
+	/delete-property/ #address-cells;
+	/delete-property/ #size-cells;
+	/delete-node/ band@0;
+	/delete-node/ band@1;
+};
+
+&{/soc/spi@1100a000/spi-nand@0/partitions} {
+	partition@0 { /* bl2 */
+		/delete-property/ read-only;
+	};
+
+	partition@100000 { /* u-boot-env */
+		/delete-property/ read-only;
+	};
+
+	partition@180000 { /* Factory */
+		/delete-property/ read-only;
+	};
+
+	partition@380000 { /* fip */
+		/delete-property/ read-only;
+	};
+
+	partition@580000 { /* product_info */
+		/delete-property/ read-only;
+	};
+
+	partition@600000 { /* kdump */
+		/delete-property/ read-only;
+	};
+};

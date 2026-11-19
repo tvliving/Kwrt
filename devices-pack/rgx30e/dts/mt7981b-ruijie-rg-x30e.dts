@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+/*
+ * Ruijie RG-X30E - 第三方 u-boot 布局（ubi 占满 111.5MB）
+ * 需要先用 bl-mt798x 的 X30E FIP 覆盖原厂 FIP 分区才能用，否则刷了起不来。
+ */
+
+/dts-v1/;
+#include "mt7981b-ruijie-rg-x30e.dtsi"
+
+/ {
+	model = "Ruijie RG-X30E";
+	compatible = "ruijie,rg-x30e", "mediatek,mt7981";
+};
+
+&partitions {
+	partition@880000 {
+		label = "ubi";
+		reg = <0x880000 0x6f80000>;
+		compatible = "linux,ubi";
+	};
+};
