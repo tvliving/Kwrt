@@ -21,14 +21,15 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: Kwrt-${{ github.ref }}-${{ matrix.slug }}
-  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 350
+    # matrix 只能在 job 级使用，放到 workflow 级会导致工作流非法（run 无 job）
+    concurrency:
+      group: Kwrt-${{ github.ref }}-${{ matrix.slug }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
