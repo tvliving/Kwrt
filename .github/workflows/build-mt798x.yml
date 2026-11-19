@@ -78,7 +78,7 @@ jobs:
       - name: 注入设备包
         if: steps.pick.outputs.selected != 'false'
         run: |
-          python3 scripts/apply-pack.py openwrt "${{ matrix.slug }}"
+          python3 ../scripts/apply-pack.py openwrt "${{ matrix.slug }}"
           grep -n "Device/" openwrt/target/linux/mediatek/image/filogic.mk | tail -5
           ls openwrt/target/linux/mediatek/dts/ | grep -E "x30e|x60-new|sl-3000"
 
