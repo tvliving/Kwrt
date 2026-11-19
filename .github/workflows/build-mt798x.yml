@@ -65,7 +65,7 @@ jobs:
             gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
             python3-setuptools rsync swig unzip zlib1g-dev file wget dwarves \
             llvm python3-pyelftools libpython3-dev aria2 jq ccache rename \
-            libelf-dev device-tree-compiler libgmp3-dev libmpc-dev
+            libelf-dev device-tree-compiler libgmp3-dev libmpc-dev             pahole libdw-dev zstd
           sudo timedatectl set-timezone "Asia/Shanghai"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
@@ -112,6 +112,17 @@ jobs:
           if grep -q '^CONFIG_PACKAGE_luci-theme-argon=y$' .config; then echo "::error::argon 仍在配置中"; exit 1; fi
           echo "---- 中文/商店 ----"
           grep -E '^CONFIG_(LUCI_LANG_zh_Hans|PACKAGE_luci-app-store)' .config || true
+
+      - name: 关闭 BTF（规避 tools/dwarves 构建失败）
+        if: steps.pick.outputs.selected != 'false'
+        run: |
+          cd openwrt
+          if grep -q '^CONFIG_KERNEL_DEBUG_INFO_BTF=y$' .config; then
+            sed -i 's/^CONFIG_KERNEL_DEBUG_INFO_BTF=y/# CONFIG_KERNEL_DEBUG_INFO_BTF is not set/' .config
+            echo "已关闭 CONFIG_KERNEL_DEBUG_INFO_BTF"
+          fi
+          make defconfig
+          grep -c 'CONFIG_KERNEL_DEBUG_INFO_BTF=y' .config || true
 
       - name: 编译
         if: steps.pick.outputs.selected != 'false'
