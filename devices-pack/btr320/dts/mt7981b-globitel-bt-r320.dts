@@ -3,7 +3,7 @@
  * Globitel BT-R320 (MT7981B + MT7531AE + 128GB eMMC)
  *
  * 移植自 EasongChung/Actions-BT-R320-Immortalwrt-6.6 的
- * mt7981b-globitel-bt-r320-emmc.dts，按本仓库（内核 6.18 / mt7981.dtsi）的写法整理：
+ * mt7981b-globitel-bt-r320-emmc.dts，按本仓库（内核 6.12 / mt7981b.dtsi）的写法整理：
  *   - SoC: MediaTek MT7981B
  *   - RAM: 512MB（DTS 声明，硬件实际 1GB，沿用原方案的首启一致性）
  *   - Switch: MediaTek MT7531AE（lan1/2/3 + wan 都在 switch 上）
@@ -20,7 +20,7 @@
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/leds/common.h>
 
-#include "mt7981.dtsi"
+#include "mt7981b.dtsi"
 
 / {
 	model = "Globitel BT-R320";
