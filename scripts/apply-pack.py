@@ -24,24 +24,30 @@ def infer_soc_includes(dstdir):
             except OSError:
                 continue
             for inc in re.findall(r'#include\s+"([^"]+\.dtsi)"', head):
-                for key in ("mt7981", "mt7986"):
-                    if inc.startswith(key):
-                        out.setdefault(key, inc)
+                m = re.fullmatch(r'(mt798[16][ab]?)\.dtsi', inc)
+                if m:
+                    out.setdefault(m.group(1)[:6], inc)
     except OSError:
         pass
     return out
 
 
-def fix_soc_includes(text, soc, dstdir):
-    """把 dts 中的 SoC include 换成当前源码树实际使用的名称。"""
+SOC_RE = re.compile(r'^(mt798[16][ab]?)\.dtsi$')
+
+
+def fix_soc_includes(text, soc, dstdir, pack_names):
+    """只改写 SoC 级 include（如 mt7981b.dtsi），包内自带文件与已存在文件不动。"""
     def repl(match):
         inc = match.group(1)
-        if os.path.exists(os.path.join(dstdir, inc)):
+        if inc in pack_names or os.path.exists(os.path.join(dstdir, inc)):
             return match.group(0)
-        for key, real in soc.items():
-            if inc.startswith(key) and real and inc != real:
-                print("[info] %s -> %s" % (inc, real))
-                return '#include "%s"' % real
+        m = SOC_RE.match(inc)
+        if not m:
+            return match.group(0)
+        real = soc.get(m.group(1)[:6])
+        if real and real != inc:
+            print("[info] %s -> %s" % (inc, real))
+            return '#include "%s"' % real
         return match.group(0)
 
     return re.sub(r'#include\s+"([^"]+\.dtsi)"', repl, text)
@@ -62,22 +68,29 @@ def main():
         print("[ERROR] %s 不是 OpenWrt 源码树" % root)
         return 1
 
-    # 1) DTS：已存在则保留源码树自己的版本，SoC dtsi 名称按本树推断
+    # 1) DTS：先原样铺开包内文件，再只对 SoC 级 include 做名称适配；
+    #    源码树已有同名 DTS 时保留本树版本（不覆盖既有机型）
     dstdir = os.path.join(mtk, "dts")
     soc = infer_soc_includes(dstdir)
-    installed = kept = 0
-    for name in sorted(os.listdir(os.path.join(pack, "dts"))):
+    pack_dts = sorted(os.listdir(os.path.join(pack, "dts")))
+    pack_names = set(pack_dts)
+    installed, kept = [], 0
+    for name in pack_dts:
         dst = os.path.join(dstdir, name)
         if os.path.exists(dst):
             kept += 1
             continue
-        with open(os.path.join(pack, "dts", name), encoding="utf-8") as fh:
+        shutil.copyfile(os.path.join(pack, "dts", name), dst)
+        installed.append(name)
+    for name in installed:
+        dst = os.path.join(dstdir, name)
+        with open(dst, encoding="utf-8") as fh:
             text = fh.read()
-        text = fix_soc_includes(text, soc, dstdir)
-        with open(dst, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(text)
-        installed += 1
-    print("[ok] DTS 安装 %d 个，保留源码树已有 %d 个，SoC dtsi=%s" % (installed, kept, soc))
+        fixed = fix_soc_includes(text, soc, dstdir, pack_names)
+        if fixed != text:
+            with open(dst, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(fixed)
+    print("[ok] DTS 安装 %d 个，保留源码树已有 %d 个，SoC dtsi=%s" % (len(installed), kept, soc))
 
     # 2) filogic.mk 追加设备定义（同名 Device 已存在则跳过）
     mk = os.path.join(mtk, "image/filogic.mk")
