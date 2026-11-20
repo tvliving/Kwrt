@@ -14,8 +14,6 @@ on:
         default: 'all'
   push:
     paths:
-      - 'devices-pack/**'
-      - 'scripts/**'
       - '.github/workflows/build-mt798x.yml'
 
 permissions:
