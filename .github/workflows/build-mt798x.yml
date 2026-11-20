@@ -71,7 +71,13 @@ jobs:
       - name: 准备源码树
         if: steps.pick.outputs.selected != 'false'
         run: |
-          git clone -q --depth 1 -b "openwrt-25.12" https://github.com/openwrt/openwrt openwrt
+          rm -rf openwrt .owrt-src
+          for i in 1 2 3; do \
+            git clone -q --depth 1 -b "openwrt-25.12" https://github.com/openwrt/openwrt .owrt-src && break; \
+            echo "::warning::clone 第 $i 次失败，重试"; sleep 10; \
+          done
+          [ -d .owrt-src ] || { echo "::error::上游源码克隆失败"; exit 1; }
+          mv .owrt-src openwrt
           echo "已克隆上游 https://github.com/openwrt/openwrt"
 
       - name: 注入设备包
