@@ -504,7 +504,11 @@ static int rtl837x_sw_reset_hw(struct switch_dev *dev, const struct switch_attr 
 
 static int _rtl837x_sw_force_set_serdes_mode(struct rtk_gsw *gsw, uint8_t sds_index, rtk_sds_mode_t mode)
 {
-	switch(mode)
+	/* 厂商代码里 1 表示“取消强制模式”，并非 rtk_sds_mode_e 的枚举成员。
+	 * 把 case 标签转型成 rtk_sds_mode_t 不能消除 GCC 的
+	 * “case value '1' not in enumerated type” —— -Wswitch 的越界检查只对
+	 * enum 类型的 switch 索引生效，故把索引显式转 int，case 保持裸 1。 */
+	switch((int)mode)
 	{
 		case SERDES_10GQXG:
 		case SERDES_10GUSXG:
@@ -529,9 +533,7 @@ static int _rtl837x_sw_force_set_serdes_mode(struct rtk_gsw *gsw, uint8_t sds_in
 				gsw->sds1mode = mode;
 			}
 			break;
-		/* 厂商代码里 1 表示“取消强制模式”，并非 rtk_sds_mode_e 的枚举成员；
-		 * 6.18 kbuild 默认 -Werror=switch，裸 case 1 会编译失败，这里显式转型 */
-		case (rtk_sds_mode_t)1:
+		case 1:
 			dev_info(gsw->dev, "Unset Serdes%d, force mode: 0x%x\n", sds_index, gsw->sds0mode);
 			if (sds_index == 0)
 				gsw->force_set_serdes0_mode = false;
