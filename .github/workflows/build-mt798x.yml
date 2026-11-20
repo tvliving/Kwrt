@@ -154,12 +154,17 @@ jobs:
           path: out/
           retention-days: 14
 
+      - name: 计算发布标签（每机型每天一个 Release）
+        if: steps.pick.outputs.selected != 'false' && success()
+        id: rel
+        run: echo "tag=${{ matrix.slug }}-$(TZ=Asia/Shanghai date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
       - name: 发布 Release
         if: steps.pick.outputs.selected != 'false' && success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ matrix.slug }}-${{ github.run_number }}
-          name: Kwrt ${{ matrix.slug }} build ${{ github.run_number }}
+          tag_name: ${{ steps.rel.outputs.tag }}
+          name: Kwrt ${{ matrix.slug }} · ${{ steps.rel.outputs.tag }}
           body: |
             自动构建：Kwrt / ${{ matrix.slug }}
             - 定时：每天 09:00（北京时间）
