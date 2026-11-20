@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       slug:
-        description: '机型（all = 全部；当前仅 be72pro）'
+        description: '机型（all = 全部）'
         required: false
         default: 'all'
   push:
@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        slug: [be72pro]
+        slug: [sl3000, rgx30e, x30epro, x60new, btr320, be72pro]
     steps:
       - name: 检出构建仓库
         uses: actions/checkout@v4
@@ -82,6 +82,12 @@ jobs:
           python3 scripts/apply-pack.py openwrt "${{ matrix.slug }}"
           grep -c "define Device/" openwrt/target/linux/mediatek/image/filogic.mk
           ls openwrt/target/linux/mediatek/dts/ | grep -E "x30e|x60-new|sl-3000|bt-r320"
+
+      - name: 注入 BE72 专用驱动（RTL837x 交换芯片）
+        if: steps.pick.outputs.selected != 'false'
+        run: |
+          cp -r ../devices-pack/"${{ matrix.slug }}"/packages/* package/kernel/ 2>/dev/null || true
+          ls package/kernel | grep -E 'rtl837x' || true
 
       - name: 生成基础 .config
         if: steps.pick.outputs.selected != 'false'
