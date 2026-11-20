@@ -119,7 +119,10 @@ jobs:
         if: steps.pick.outputs.selected != 'false'
         run: |
           cd openwrt
+          sed -i '/^CONFIG_VERSION_DIST=/d' .config
+          echo 'CONFIG_VERSION_DIST="Kwrt"' >> .config
           make defconfig
+          grep -q '^CONFIG_VERSION_DIST="Kwrt"$' .config || { echo "::error::VERSION_DIST 未生效（期望 kwrt-* 产物名）"; exit 1; }
           echo "---- 机型 ----"
           grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config || {
             echo "::error::机型未生效，检查 filogic.mk 是否含对应 Device 定义"; exit 1; }
