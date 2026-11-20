@@ -163,10 +163,10 @@ jobs:
           path: out/
           retention-days: 14
 
-      - name: 计算发布标签（每机型每天一个 Release）
+      - name: 计算发布标签（每机型每周一个 Release）
         if: steps.pick.outputs.selected != 'false' && success()
         id: rel
-        run: echo "tag=${{ matrix.slug }}-$(TZ=Asia/Shanghai date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+        run: echo "tag=${{ matrix.slug }}-$(TZ=Asia/Shanghai date +%G-W%V)" >> "$GITHUB_OUTPUT"
 
       - name: 发布 Release
         if: steps.pick.outputs.selected != 'false' && success()
