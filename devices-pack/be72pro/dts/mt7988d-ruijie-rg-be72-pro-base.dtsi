@@ -16,7 +16,7 @@
 		led-failsafe = &led_status_red;
 		led-running = &led_status_blue_atm;
 		led-upgrade = &led_status_green_atm;
-		serial0 = &uart0;
+		serial0 = &serial0;
 	};
 
 	chosen {
@@ -304,6 +304,32 @@
 			groups = "pcie_2l_0_pereset", "pcie_clk_req_n0_0";
 		};
 	};
+
+	mdio0_pins: mdio0-pins {
+		mux {
+			function = "eth";
+			groups = "mdc_mdio0";
+		};
+
+		conf {
+			groups = "mdc_mdio0";
+			drive-strength = <MTK_DRIVE_10mA>;
+		};
+	};
+
+	i2c0_pins: i2c0-pins-g0 {
+		mux {
+			function = "i2c";
+			groups = "i2c0_1";
+		};
+	};
+
+	spi0_flash_pins: spi0-flash-pins {
+		mux {
+			function = "spi";
+			groups = "spi0", "spi0_wp_hold";
+		};
+	};
 };
 
 &spi0 {
@@ -378,7 +404,7 @@
 	};
 };
 
-&uart0 {
+&serial0 {
 	status = "okay";
 };
 
