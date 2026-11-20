@@ -122,11 +122,11 @@ jobs:
           # VERSION_DIST 定义在 package/base-files/image-config.in 的 `if VERSIONOPT` 里，
           # 而 VERSIONOPT 是 menuconfig（默认 n、仅在 IMAGEOPT=y 时可见），IMAGEOPT 也是默认 n。
           # 三者不全开时 make defconfig 会把 CONFIG_VERSION_DIST 直接丢掉。
-          sed -i '/^CONFIG_IMAGEOPT=/d;/^CONFIG_VERSIONOPT=/d;/^CONFIG_VERSION_DIST=/d' .config
           echo 'CONFIG_IMAGEOPT=y' >> .config
           echo 'CONFIG_VERSIONOPT=y' >> .config
-          echo 'CONFIG_VERSION_DIST="Kwrt"' >> .config
           make defconfig
+          sed -i '/^CONFIG_VERSION_DIST=/d' .config
+          echo 'CONFIG_VERSION_DIST="Kwrt"' >> .config
           grep -q '^CONFIG_VERSION_DIST="Kwrt"$' .config || { echo "::error::VERSION_DIST 未生效（期望 kwrt-* 产物名）"; exit 1; }
           echo "---- 机型 ----"
           grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config || {
