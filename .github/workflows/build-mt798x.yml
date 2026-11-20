@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       slug:
-        description: '机型（all = 全部）'
+        description: '机型（all = 全部；当前仅 be72pro）'
         required: false
         default: 'all'
   push:
@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        slug: [sl3000, rgx30e, x30epro, x60new, btr320, be72pro]
+        slug: [be72pro]
     steps:
       - name: 检出构建仓库
         uses: actions/checkout@v4
