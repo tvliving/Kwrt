@@ -1,4 +1,4 @@
-# Kwrt 多机型编译：SL-3000 / SL-3000 eMMC、Ruijie RG-X30E、Ruijie RG-X30E Pro、Ruijie RG-X60 New、Globitel BT-R320
+# Kwrt 多机型编译：SL-3000 / SL-3000 eMMC、Ruijie RG-X30E、Ruijie RG-X30E Pro、Ruijie RG-X60 New、Globitel BT-R320、Ruijie RG-BE72 Pro (U-Boot mod)
 # 每日 09:00（北京时间，UTC+8）定时构建，产物发布到 Release
 name: Build Kwrt MT798x
 
@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        slug: [sl3000, rgx30e, x30epro, x60new, btr320]
+        slug: [sl3000, rgx30e, x30epro, x60new, btr320, be72pro]
     steps:
       - name: 检出构建仓库
         uses: actions/checkout@v4
