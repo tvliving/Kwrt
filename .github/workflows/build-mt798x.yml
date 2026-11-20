@@ -86,8 +86,13 @@ jobs:
       - name: 注入 BE72 专用驱动（RTL837x 交换芯片）
         if: steps.pick.outputs.selected != 'false'
         run: |
-          cp -r ../devices-pack/"${{ matrix.slug }}"/packages/* package/kernel/ 2>/dev/null || true
-          ls package/kernel | grep -E 'rtl837x' || true
+          cd openwrt
+          if [ -d "../devices-pack/${{ matrix.slug }}/packages" ]; then
+            cp -r ../devices-pack/"${{ matrix.slug }}"/packages/* package/kernel/
+            ls package/kernel | grep -E 'rtl837x'
+          else
+            echo "设备包无 packages/ 目录，跳过驱动注入"
+          fi
 
       - name: 生成基础 .config
         if: steps.pick.outputs.selected != 'false'
