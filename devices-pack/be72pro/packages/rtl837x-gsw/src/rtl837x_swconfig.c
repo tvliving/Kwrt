@@ -529,7 +529,9 @@ static int _rtl837x_sw_force_set_serdes_mode(struct rtk_gsw *gsw, uint8_t sds_in
 				gsw->sds1mode = mode;
 			}
 			break;
-		case 1:
+		/* 厂商代码里 1 表示“取消强制模式”，并非 rtk_sds_mode_e 的枚举成员；
+		 * 6.18 kbuild 默认 -Werror=switch，裸 case 1 会编译失败，这里显式转型 */
+		case (rtk_sds_mode_t)1:
 			dev_info(gsw->dev, "Unset Serdes%d, force mode: 0x%x\n", sds_index, gsw->sds0mode);
 			if (sds_index == 0)
 				gsw->force_set_serdes0_mode = false;
