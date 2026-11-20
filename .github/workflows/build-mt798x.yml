@@ -147,9 +147,22 @@ jobs:
           if make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log; then
             echo "编译成功"
           else
-            echo "::warning::并行编译失败，串行重跑 target/linux 以输出真实错误"
+            # 并行构建（-j）会把具体错误吞掉，先判定失败的构建单元再逐个详查
+            failed=$(grep -oE 'ERROR: (package|target)/[^ ]+ failed to build' build.log | awk '{print $2}' | sort -u || true)
+            echo "::warning::并行编译失败，失败单元: ${failed:-未识别}"
+            for u in $failed; do
+              case "$u" in
+                package/*)
+                  echo "::group::单包详查 $u（V=s -j1 重跑）"
+                  make "$u/compile" V=s -j1 2>&1 | tail -120 || true
+                  echo "::endgroup::"
+                  ;;
+              esac
+            done
+            echo "::group::target/linux 串行重跑（取镜像阶段真实错误）"
             make target/linux/install V=s 2>&1 | tail -150 || true
-            echo "::error::target/linux 镜像阶段失败，错误见上方日志"
+            echo "::endgroup::"
+            echo "::error::编译失败，失败单元: ${failed:-未识别}，具体错误见上方分组日志"
             exit 1
           fi
 
