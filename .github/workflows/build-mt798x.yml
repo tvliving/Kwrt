@@ -1,5 +1,5 @@
-# Kwrt 多机型编译：SL-3000 / SL-3000 eMMC、Ruijie RG-X30E、Ruijie RG-X30E Pro、Ruijie RG-X60 New、Globitel BT-R320、Ruijie RG-BE72 Pro (U-Boot mod)
-# 每日 09:00（北京时间，UTC+8）定时构建，产物发布到 Release
+# 多机型编译：SL-3000 / SL-3000 eMMC、Ruijie RG-X30E、Ruijie RG-X30E Pro、Ruijie RG-X60 New、Globitel BT-R320、Ruijie RG-BE72 Pro (U-Boot mod)
+# 手动触发（workflow_dispatch）；每个机型每周一个 Release，tag = kwrt-<机型>-<年-W周>
 name: Build Kwrt MT798x
 
 on:
@@ -9,9 +9,6 @@ on:
         description: '机型（all = 全部）'
         required: false
         default: 'all'
-  push:
-    paths:
-      - '.github/workflows/build-mt798x.yml'
 
 permissions:
   contents: write
@@ -176,6 +173,14 @@ jobs:
         run: |
           mkdir -p out
           cp -f openwrt/bin/targets/mediatek/filogic/*sysupgrade* out/ 2>/dev/null || true
+          # 同一个镜像会同时以 <发行版>-<版本>-<修订>-... 和 openwrt-...（上游默认名）两个文件名出现，
+          # 只保留带发行版前缀的那份，别让同一个包在 Release 里躺两份
+          for f in out/openwrt-mediatek-filogic-*; do
+            [ -e "$f" ] || continue
+            base=$(basename "$f" | sed 's/^openwrt-//')
+            sib=$(ls out | grep -v '^openwrt-' | grep -F -- "-$base" | head -1)
+            if [ -n "$sib" ]; then rm -f "$f"; echo "去掉重复文件: $base（保留 $sib）"; fi
+          done
           (cd out && sha256sum ./* > sha256sums.txt) 2>/dev/null || true
           ls -lh out
 
@@ -190,7 +195,7 @@ jobs:
       - name: 计算发布标签（每机型每周一个 Release）
         if: steps.pick.outputs.selected != 'false' && success()
         id: rel
-        run: echo "tag=${{ matrix.slug }}-$(TZ=Asia/Shanghai date +%G-W%V)" >> "$GITHUB_OUTPUT"
+        run: echo "tag=kwrt-${{ matrix.slug }}-$(TZ=Asia/Shanghai date +%G-W%V)" >> "$GITHUB_OUTPUT"
 
       - name: 发布 Release
         if: steps.pick.outputs.selected != 'false' && success()
