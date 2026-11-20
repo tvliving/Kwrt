@@ -10,10 +10,6 @@ on:
         description: 编译完成后发布 Release
         type: boolean
         default: true
-  schedule:
-    # 每周三 10:00 北京时间起，各 target 依次错开 3 小时（UTC）
-    - cron: '0 5 * * 3'
-
 permissions:
   contents: write
 

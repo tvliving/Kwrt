@@ -26,10 +26,6 @@ on:
     paths:
       - '.github/workflows/kwrt-hy3000.yml'
       - 'devices/mediatek_filogic_bt_r320/**'
-  schedule:
-    # 每周一 09:00（北京时间，UTC+8 → UTC 01:00），与 kwrt-mt7981/mt7986 相同
-    - cron: '0 1 * * 1'
-
 permissions:
   contents: write
 

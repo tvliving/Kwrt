@@ -27,10 +27,6 @@ on:
     paths:
       - '.github/workflows/kwrt-extra-devices.yml'
       - 'devices/mediatek_filogic_lede_gap/**'
-  schedule:
-    # 每周四 09:00（北京时间，UTC+8 → UTC 01:00）
-    - cron: '0 1 * * 4'
-
 permissions:
   contents: write
 

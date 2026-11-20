@@ -24,10 +24,6 @@ on:
     paths:
       - '.github/workflows/kwrt-mt798x-other.yml'
       - 'devices/mediatek_filogic_mt798x_other/**'
-  schedule:
-    # 周二 / 周四 12:00（北京时间，UTC+8 → UTC 04:00），与其他仓库定时任务一致
-    - cron: '0 4 * * 2,4'
-
 permissions:
   contents: write
 

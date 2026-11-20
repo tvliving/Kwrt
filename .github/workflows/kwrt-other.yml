@@ -16,11 +16,6 @@ on:
         description: 编译完成后发布 Release
         type: boolean
         default: true
-  schedule:
-    # 每 8 天一次。GitHub cron 不支持真正的「每 N 天」，这里取每月 1/9/17/25 日 18:00 UTC
-    # （次日 02:00 北京时间），相邻间隔 8/8/8 天，跨月因月份长度会短 1~2 天
-    - cron: '0 18 */8 * *'
-
 permissions:
   contents: write
 

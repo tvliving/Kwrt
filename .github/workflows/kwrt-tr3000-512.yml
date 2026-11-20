@@ -14,10 +14,6 @@ on:
         description: 同时编译 U-Boot（bl-mt798x 多布局）
         type: boolean
         default: false
-  schedule:
-    # 每周一 09:00（北京时间，UTC+8 → UTC 01:00），与 kwrt-mt7981/mt7986 相同
-    - cron: '0 1 * * 1'
-
 permissions:
   contents: write
 
