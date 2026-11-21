@@ -223,7 +223,11 @@ jobs:
           [ -n "$root" ] || { echo "::error::镜像里找不到 rootfs"; find /tmp/img -maxdepth 2 | head; exit 1; }
           # runner 不是 root，unsquashfs 创建 /dev/console 之类设备节点会返回非 0，
           # 但对只读校验没有影响，这里忽略退出码，改为检查关键目录是否解出来。
-          unsquashfs -q -d /tmp/rootfs "$root" >/dev/null 2>&1 || true
+          # 必须用 sudo：普通用户 mknod /dev/console 会失败，解包可能不完整
+          sudo rm -rf /tmp/rootfs
+          sudo unsquashfs -q -d /tmp/rootfs "$root" >/dev/null 2>&1 || true
+          sudo chmod -R a+rX /tmp/rootfs 2>/dev/null || true
+          echo "rootfs 文件数：$(find /tmp/rootfs -type f 2>/dev/null | wc -l)"
           [ -d /tmp/rootfs/etc ] || { echo "::error::rootfs 解包失败"; ls -l /tmp/img; exit 1; }
 
           # 逐项体检：一次跑完所有检查并汇总，避免第一项失败就看不到其余信息
@@ -231,6 +235,11 @@ jobs:
           ok()   { echo "  [OK]   $*"; }
           fail() { echo "  [FAIL] $*"; bad=$((bad + 1)); }
           warn() { echo "  [WARN] $*"; }
+          pkg_installed() {
+            grep -q "^Package: $1$" /tmp/rootfs/usr/lib/opkg/status 2>/dev/null && return 0
+            grep -q "^P:$1$" /tmp/rootfs/lib/apk/db/installed 2>/dev/null && return 0
+            return 1
+          }
 
           echo "---- 发行版 ----"
           grep -E '^DISTRIB_(ID|DESCRIPTION)=' /tmp/rootfs/etc/openwrt_release || true
@@ -239,8 +248,12 @@ jobs:
 
           echo "---- 首页（标准 LuCI：状态-概览）----"
           ls /tmp/rootfs/www/luci-static/resources/view/status/ 2>/dev/null | head -20 || true
-          if test -f /tmp/rootfs/www/luci-static/resources/view/status/index.js || grep -q luci-mod-status /tmp/rootfs/lib/apk/db/installed 2>/dev/null; then
-            ok "状态-概览页存在"
+          ls /tmp/rootfs/usr/lib/lua/luci/controller/admin/ 2>/dev/null | head -20 || true
+          if [ -f /tmp/rootfs/www/luci-static/resources/view/status/index.js ] \
+             || [ -f /tmp/rootfs/usr/lib/lua/luci/controller/admin/status.lua ] \
+             || pkg_installed luci-mod-status \
+             || pkg_installed luci-mod-admin-full; then
+            ok "状态/概览页存在"
           else
             fail "缺少 LuCI 状态/概览页（登录后没有首页）"
           fi
