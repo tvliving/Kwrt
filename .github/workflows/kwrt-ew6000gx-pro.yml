@@ -1,0 +1,158 @@
+# Kwrt 锐捷 RG-EW6000GX PRO (MT7986A) 固件构建
+#
+# 机型支持来源：chase535/immortalwrt-mt798x-6.6-cudy-wr3000v1
+#   target/linux/mediatek/dts/mt7986a-ruijie-ew-6000gx-pro*.dts(+dtsi)
+#   target/linux/mediatek/image/filogic.mk 的 ruijie_ew-6000gx-pro* 定义
+#   filogic/base-files/etc/board.d/02_network 与 11_fix_wifi_mac 的对应分支
+#
+# 本工作流基于 openwrt-25.12 官方源码树，注入 devices-pack/ew6000gx 后编译
+# 默认固件：ruijie_ew-6000gx-pro（107M 布局 + sysupgrade-tar，沿用原厂 U-Boot）
+# 主题：luci-theme-vantage（已移除 argon）；内置 iStore 商店 + 简体中文包
+name: Build Kwrt RG-EW6000GX Pro
+
+on:
+  schedule:
+    # 每周六 09:00（北京时间 UTC+8 → UTC 01:00）
+    - cron: '0 1 * * 6'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kwrt-ew6000gx-pro
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Shanghai
+  SLUG: ew6000gx
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      - name: 检出构建仓库
+        uses: actions/checkout@v4
+
+      - name: 释放磁盘空间
+        uses: coder-xiaomo/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: 安装依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget dwarves \
+            llvm python3-pyelftools libpython3-dev aria2 jq ccache rename \
+            libelf-dev device-tree-compiler libgmp3-dev libmpc-dev pahole libdw-dev zstd
+          sudo timedatectl set-timezone "Asia/Shanghai"
+
+      - name: 准备源码树（OpenWrt 25.12）
+        run: |
+          git clone -q --depth 1 -b openwrt-25.12 https://github.com/openwrt/openwrt openwrt
+          echo "已克隆 openwrt-25.12"
+
+      - name: 注入设备包
+        run: |
+          python3 scripts/apply-pack.py openwrt "$SLUG"
+          grep -n "ew-6000gx" openwrt/target/linux/mediatek/image/filogic.mk | tail -6
+          ls openwrt/target/linux/mediatek/dts/ | grep -i 6000gx
+
+      - name: 生成基础 .config
+        run: |
+          cd openwrt
+          {
+            echo 'CONFIG_TARGET_mediatek=y'
+            echo 'CONFIG_TARGET_mediatek_filogic=y'
+            cat ../devices-pack/"$SLUG"/config.fragment
+          } > .config
+          echo "---- 基础配置 ----"; cat .config
+
+      - name: 主题 / iStore / 中文包
+        run: |
+          cd openwrt
+          bash ../scripts/customize.sh .
+
+      - name: 校验机型与主题并 defconfig
+        run: |
+          cd openwrt
+          make defconfig
+          echo "---- 机型 ----"
+          grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config || {
+            echo "::error::机型未生效，检查 filogic.mk 是否含对应 Device 定义"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_luci-theme-vantage=y$' .config || { echo "::error::vantage 主题未生效"; exit 1; }
+          if grep -qE '^CONFIG_PACKAGE_luci-theme-(argon|bootstrap|material)=y$' .config; then
+            echo "::error::仍有其他预装主题（只允许 luci-theme-vantage）"; exit 1; fi
+          echo "---- 中文/商店 ----"
+          grep -q '^CONFIG_LUCI_LANG_zh_Hans=y$' .config || { echo "::error::中文语言包未开启"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_luci-i18n-base-zh-cn=y$' .config || { echo "::error::LuCI 基础中文包未生效"; exit 1; }
+          echo "---- store 诊断 ----"
+          grep -n 'luci-app-store' .config | head -5 || true
+          grep -q '^CONFIG_PACKAGE_luci-app-store=y$' .config || {
+            grep -A12 'config PACKAGE_luci-app-store' tmp/.config-package.in | head -20 || true
+            echo "::error::iStore 市场未生效"; exit 1; }
+
+      - name: 关闭 BTF（规避 tools/dwarves 构建失败）
+        run: |
+          cd openwrt
+          if grep -q '^CONFIG_KERNEL_DEBUG_INFO_BTF=y$' .config; then
+            sed -i 's/^CONFIG_KERNEL_DEBUG_INFO_BTF=y/# CONFIG_KERNEL_DEBUG_INFO_BTF is not set/' .config
+            echo "已关闭 CONFIG_KERNEL_DEBUG_INFO_BTF"
+          fi
+          make defconfig
+
+      - name: 编译
+        run: |
+          cd openwrt
+          set -o pipefail
+          if make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log; then
+            echo "编译成功"
+          else
+            echo "::warning::并行编译失败，串行重跑 target/linux 以输出真实错误"
+            make target/linux/install V=s 2>&1 | tail -150 || true
+            echo "::error::target/linux 镜像阶段失败，错误见上方日志"
+            exit 1
+          fi
+
+      - name: 收集产物
+        run: |
+          mkdir -p out
+          cp -f openwrt/bin/targets/mediatek/filogic/*ew-6000gx* out/ 2>/dev/null || true
+          cp -f openwrt/bin/targets/mediatek/filogic/*.json out/ 2>/dev/null || true
+          (cd out && sha256sum ./* > sha256sums.txt) 2>/dev/null || true
+          ls -lh out
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kwrt-${{ env.SLUG }}-${{ github.run_number }}
+          path: out/
+          retention-days: 14
+
+      - name: 发布 Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.SLUG }}-${{ github.run_number }}
+          name: Kwrt RG-EW6000GX Pro build ${{ github.run_number }}
+          body: |
+            自动构建：tvliving/Kwrt / ruijie_ew-6000gx-pro（MT7986A）
+            - 定时：每周六 09:00（北京时间）
+            - 主题：luci-theme-vantage（已移除 argon）
+            - 内置：iStore 软件中心 + 简体中文语言包
+            - 布局：107M UBI + sysupgrade-tar（沿用原厂 U-Boot）
+            - 运行记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          files: out/*
+          fail_on_unmatched_files: false

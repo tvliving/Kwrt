@@ -1,0 +1,12 @@
+#!/bin/sh
+# 仅处理锐捷 RG-EW6000GX PRO 的 WiFi MAC（独立脚本，避免整体覆盖上游 11_fix_wifi_mac）
+[ -e /sys${DEVPATH}/macaddress ] || exit 0
+case "$(board_name)" in
+ruijie,ew-6000gx-pro*)
+	addr=$(mtd_get_mac_ascii product_info ethaddr)
+	[ -n "$addr" ] || exit 0
+	[ "$PHYNBR" = "0" ] && macaddr_add "$addr" 2 > /sys${DEVPATH}/macaddress
+	[ "$PHYNBR" = "1" ] && macaddr_add "$addr" 3 > /sys${DEVPATH}/macaddress
+	;;
+esac
+exit 0
