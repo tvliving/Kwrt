@@ -208,7 +208,7 @@ jobs:
           unsquashfs -q -d /tmp/rootfs "$root" >/dev/null
           echo "---- 发行版 ----"
           grep -E '^DISTRIB_(ID|DESCRIPTION)=' /tmp/rootfs/etc/openwrt_release || true
-          grep -q '^DISTRIB_ID="Kwrt"' /tmp/rootfs/etc/openwrt_release \
+          grep -q "^DISTRIB_ID=.*Kwrt" /tmp/rootfs/etc/openwrt_release \
             || { echo "::error::发行版不是 Kwrt（LuCI 登录页会显示 OpenWrt）"; exit 1; }
           echo "---- 首页 ----"
           test -f /tmp/rootfs/usr/lib/lua/luci/controller/quickstart.lua \
