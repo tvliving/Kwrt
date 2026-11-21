@@ -22,7 +22,7 @@ luci-mod-system
 luci-mod-network
 uhttpd
 uhttpd-mod-ubus
-luci-proto-pppoe
+luci-proto-ppp
 luci-proto-wireguard
 
 # ---- 主题 / 应用商店 ----
@@ -77,13 +77,11 @@ pciutils
 ethtool
 iperf3
 tcpdump
-mtr
 socat
 lsof
 unzip
 ip-full
 ipset
-iptables-nft
 kmod-tun
 kmod-wireguard
 wireguard-tools
