@@ -58,6 +58,16 @@ exit 0
 EOF
 chmod 755 "$DEF"
 
+# 4) apk 版本号非法：上游 PKG_VERSION 形如 0.17.1-rc20261028-r2，apk 模式下
+#    Makefile 只把 "-rc" 换成 "_rc"，末尾的 "-r2" 被 apk 当成「修订号」，
+#    再拼上 PKG_RELEASE 就是 0.17.1_rc20261028-r2-r44，apk mkpkg 直接报
+#    "package version is invalid" 整包编译失败（opkg 不校验，所以 lede 没事）。
+MK=package/luci-app-quickstart/Makefile
+if [ -f "$MK" ]; then
+  sed -i -E 's/^(PKG_VERSION:=.*[0-9])-r[0-9]+[[:space:]]*$/\1/' "$MK"
+  echo "[ok] PKG_VERSION 已去掉 apk 非法的 -rN 尾巴：$(grep -E '^PKG_VERSION:=' "$MK")"
+fi
+
 # 3) .config 已存在时确保两个包被选中（不存在则由各 workflow 自己的配置段负责）
 if [ -f .config ]; then
   for s in luci-app-quickstart quickstart luci-compat luci-lua-runtime; do
