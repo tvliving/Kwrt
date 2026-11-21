@@ -92,9 +92,16 @@ def main():
                 fh.write(fixed)
     print("[ok] DTS 安装 %d 个，保留源码树已有 %d 个，SoC dtsi=%s" % (len(installed), kept, soc))
 
-    # 1.5) include 预检：包内 dts 引用的 "xxx.dtsi" 必须能解析到，否则 50 分钟后才在
-    #      target/linux/install 阶段炸（fatal error: xxx: No such file or directory）
-    missing = []
+    # 1.5) include 预检：包内 dts 引用的同厂商文件必须落地，否则要等 50 分钟后的
+    #      target/linux/install 阶段才炸（fatal error: xxx: No such file or directory）。
+    #      注意 mt7986a.dtsi 这类 SoC dtsi 在内核树里，不在 dts 目录，不能当缺失处理；
+    #      因此只对「文件名里带同厂商 token（如 ruijie）」的 include 硬报错，其余仅提示。
+    vendor_tokens = set()
+    for n in pack_names:
+        parts = n.split("-")
+        if len(parts) > 1 and parts[1]:
+            vendor_tokens.add(parts[1])
+    missing, soft = [], []
     for name in pack_dts:
         path = os.path.join(dstdir, name)
         try:
@@ -105,11 +112,16 @@ def main():
         for inc in re.findall(r'#include\s+"([^"]+)"', text):
             if inc in pack_names or os.path.exists(os.path.join(dstdir, inc)):
                 continue
-            missing.append((name, inc))
+            if any(tok in inc for tok in vendor_tokens):
+                missing.append((name, inc))
+            else:
+                soft.append((name, inc))
+    for src, inc in soft:
+        print("[info] %s 引用 %s（预期在源码树/内核树内，跳过）" % (src, inc))
     if missing:
         for src, inc in missing:
             print("[ERROR] %s 引用了不存在的 %s" % (src, inc))
-        print("::error::设备包 include 不完整，请补齐上面的 .dtsi 后重试")
+        print("::error::设备包同厂商 dtsi 不完整，请补齐上面的文件后重试")
         return 2
     print("[ok] DTS include 预检通过")
 
