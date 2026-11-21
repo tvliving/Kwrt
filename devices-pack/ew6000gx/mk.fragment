@@ -5,6 +5,9 @@ define Device/ruijie_ew-6000gx-pro
   DEVICE_DTS_CONFIG := config@ruijie_x60_gsw_en8811h_phy
   DEVICE_DTS_DIR := ../dts
   DEVICE_PACKAGES := kmod-phy-airoha-en8811h
+  # 原厂多分区 U-Boot 直接刷 sysupgrade 即可，只出一个刷机包，不再编 initramfs 恢复包
+  IMAGES := sysupgrade.bin
+  KERNEL_INITRAMFS :=
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
 endef
 
@@ -17,6 +20,8 @@ define Device/ruijie_ew-6000gx-pro-expand
   DEVICE_DTS_CONFIG := config@ruijie_x60_gsw_en8811h_phy
   DEVICE_DTS_DIR := ../dts
   DEVICE_PACKAGES := kmod-phy-airoha-en8811h
+  IMAGES := sysupgrade.bin
+  KERNEL_INITRAMFS :=
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
 endef
 
@@ -29,6 +34,8 @@ define Device/ruijie_ew-6000gx-pro-stock
   DEVICE_DTS_CONFIG := config@ruijie_x60_gsw_en8811h_phy
   DEVICE_DTS_DIR := ../dts
   DEVICE_PACKAGES := kmod-phy-airoha-en8811h
+  IMAGES := sysupgrade.bin
+  KERNEL_INITRAMFS :=
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
 endef
 

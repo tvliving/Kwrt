@@ -31,6 +31,10 @@ fi
 echo "== 5/5 写入配置与默认主题 =="
 cat >> .config <<'EOF'
 CONFIG_PACKAGE_luci=y
+CONFIG_PACKAGE_luci-base=y
+CONFIG_PACKAGE_luci-mod-admin-full=y
+CONFIG_PACKAGE_uhttpd=y
+CONFIG_PACKAGE_uhttpd-mod-ubus=y
 CONFIG_PACKAGE_luci-theme-vantage=y
 CONFIG_PACKAGE_luci-theme-bootstrap=n
 CONFIG_PACKAGE_luci-theme-argon=n
@@ -57,7 +61,26 @@ uci -q batch <<-EOT
 	commit luci
 EOT
 [ -x /etc/init.d/taskd ] && { /etc/init.d/taskd enable; /etc/init.d/taskd start; }
+# LuCI 的 web 入口与 rpcd 必须开机自启，否则刷完只有 ssh 能进
+for s in uhttpd rpcd; do
+	[ -x "/etc/init.d/$s" ] && { "/etc/init.d/$s" enable; "/etc/init.d/$s" restart 2>/dev/null || true; }
+done
 exit 0
 EOF
 chmod +x files/etc/uci-defaults/99-default-theme
+cat > files/etc/uci-defaults/98-lan-ip <<'EOF'
+#!/bin/sh
+# 后台管理地址固定 192.168.110.1（board.d 生成的 lan 配置在这里改写，首启生效）
+uci -q batch <<-EOT
+	set network.lan.ipaddr='192.168.110.1'
+	set network.lan.netmask='255.255.255.0'
+	commit network
+	set dhcp.lan.start='100'
+	set dhcp.lan.limit='150'
+	set dhcp.lan.leasetime='12h'
+	commit dhcp
+EOT
+exit 0
+EOF
+chmod +x files/etc/uci-defaults/98-lan-ip
 echo "[done] customize"
