@@ -167,9 +167,15 @@ jobs:
           if make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log; then
             echo "编译成功"
           else
-            echo "::warning::并行编译失败，串行重跑 target/linux 以输出真实错误"
-            make target/linux/install V=s 2>&1 | tail -150 || true
-            echo "::error::target/linux 镜像阶段失败，错误见上方日志"
+            fail="$(grep -o 'ERROR: [^ ]* failed to build' build.log | head -1 | awk '{print $2}')"
+            echo "== 失败包: ${fail:-未识别}"
+            grep -n 'Error [0-9]\|error:\|ERROR:' build.log | tail -20 || true
+            if [ -n "$fail" ] && [ -d "$fail" ]; then
+              echo "::group::单包详细编译（$fail）"
+              make "$fail/compile" V=s -j1 2>&1 | tail -120 || true
+              echo "::endgroup::"
+            fi
+            echo "::error::并行编译失败，真实错误见上方日志"
             exit 1
           fi
 
@@ -208,7 +214,10 @@ jobs:
           tar -xf "$bin" -C /tmp/img
           root=$(find /tmp/img -name root -o -name rootfs | head -1)
           [ -n "$root" ] || { echo "::error::镜像里找不到 rootfs"; find /tmp/img -maxdepth 2 | head; exit 1; }
-          unsquashfs -q -d /tmp/rootfs "$root" >/dev/null
+          # runner 不是 root，unsquashfs 创建 /dev/console 之类设备节点会返回非 0，
+          # 但对只读校验没有影响，这里忽略退出码，改为检查关键目录是否解出来。
+          unsquashfs -q -d /tmp/rootfs "$root" >/dev/null 2>&1 || true
+          [ -d /tmp/rootfs/etc ] || { echo "::error::rootfs 解包失败"; ls -l /tmp/img; exit 1; }
           echo "---- 发行版 ----"
           grep -E '^DISTRIB_(ID|DESCRIPTION)=' /tmp/rootfs/etc/openwrt_release || true
           grep -q "^DISTRIB_ID=.*Kwrt" /tmp/rootfs/etc/openwrt_release \
