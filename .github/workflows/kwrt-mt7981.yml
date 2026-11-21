@@ -1,6 +1,14 @@
 # Kwrt（kiddin9/Kwrt）MT7981 (Filogic 820) 固件构建
 # 构建方式完全沿用 Kwrt 官方配方：openwrt/openwrt openwrt-25.12 源码
 # + devices/common 的 diy 定制（kiddin9 软件源、内核补丁等）+ 本机型目录的配置
+#
+# 2026-11-21 改造：
+#   1) 4 组 matrix 并行 —— 118 款机型按序号四等分，每组只启用自己那组的机型，
+#      单 job 的镜像生成阶段从「118 款串行」降到「约 30 款」。
+#      注意：包与内核的编译在每组都会完整做一遍（同 target、同包集合），
+#      所以这部分要靠下面的 ccache 消除，两者必须一起用才有意义。
+#   2) ccache 持久化 —— CONFIG_CCACHE=y + actions/cache，跨 run 复用已编译对象，
+#      二次构建起通常能省掉一半以上的 C 编译时间。
 name: 🛠️ Kwrt MT7981 (Filogic 820) Build
 
 on:
@@ -21,12 +29,30 @@ env:
   TZ: Asia/Shanghai
   TARGET: mediatek_filogic_mt7981
   TAG_PREFIX: kwrt-mt7981
-  MIN_DEVICES: '100'
+  # 拆分组数。改这里必须同步改 jobs.build.strategy.matrix.group 的取值列表
+  GROUPS: '4'
+  # 每组至少要启用多少款机型（118 款 / 4 ≈ 22~30；考虑后续机型增减，下限放到 15）
+  MIN_DEVICES_PER_GROUP: '15'
+  # ccache 上限与校验方式。
+  # 注意 CCACHE_DIR 不能在这里设：rules.mk 里是
+  #   export CCACHE_DIR := $(if $(CONFIG_CCACHE_DIR),...,$(TOPDIR)/.ccache)
+  # 用的是 := 强制赋值，环境变量会被它覆盖，所以缓存固定落在 openwrt/.ccache，
+  # actions/cache 的 path 必须跟着它走，否则打包的是空目录。
+  CCACHE_MAXSIZE: 3G
+  CCACHE_COMPILERCHECK: content
 
 jobs:
   build:
+    name: build g${{ matrix.group }}
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    strategy:
+      # 一组失败不连坐其他组，产物还能出
+      fail-fast: false
+      matrix:
+        group: [0, 1, 2, 3]
+    env:
+      GROUP: ${{ matrix.group }}
 
     steps:
       - name: Checkout 构建配方
@@ -59,11 +85,26 @@ jobs:
           sudo timedatectl set-timezone "Asia/Shanghai"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
+          ccache --version | head -1
 
       - name: 克隆 OpenWrt 源码（openwrt-25.12）
         run: |
           set -x
           git clone --depth 1 -b openwrt-25.12 https://github.com/openwrt/openwrt openwrt
+
+      - name: 恢复 ccache 缓存
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          # 路径必须是 openwrt/.ccache —— rules.mk 把 CCACHE_DIR 钉在 $(TOPDIR)/.ccache，
+          # TOPDIR 就是 clone 出来的 openwrt 目录
+          path: openwrt/.ccache
+          # key 带 run_id 保证每次都能写入新版本；restore-keys 前缀匹配上一次的缓存。
+          # 优先找同组，找不到再退到其他组（各组编的包完全一致，缓存可共享）。
+          key: ccache-${{ env.TARGET }}-${{ github.run_id }}-g${{ matrix.group }}
+          restore-keys: |
+            ccache-${{ env.TARGET }}-g${{ matrix.group }}-
+            ccache-${{ env.TARGET }}-
 
       - name: 构建目录挂到大盘
         run: |
@@ -182,15 +223,61 @@ jobs:
           echo "CONFIG_PACKAGE_luci-lib-taskd=y" >> .config
           echo "CONFIG_PACKAGE_taskd=y" >> .config
           echo "CONFIG_PACKAGE_luci-lua-runtime=y" >> .config
+          # ccache：OpenWrt 只有 CONFIG_CCACHE=y 才会把 CC 换成 ccache
+          echo "CONFIG_CCACHE=y" >> .config
           make defconfig
           grep -qE '^CONFIG_PACKAGE_luci-i18n-base-zh-cn=y$' .config \
             || { echo "::error::简体中文语言包未生效"; exit 1; }
 
-          echo "===== 启用的机型数 ====="
+          # ===== 机型分组：只保留本组机型，其余全部置 n =====
+          # 必须在 defconfig 之后做：defconfig 会按 target 重新展开 ALL_PROFILES，
+          # 提前改会被它覆盖回去。
+          python3 - "$GROUP" "$GROUPS" <<'PYEOF'
+          import sys
+          group, groups = int(sys.argv[1]), int(sys.argv[2])
+          prefix = "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_"
+          lines = open(".config", encoding="utf-8", errors="surrogateescape").readlines()
+
+          def dev_of(line):
+              s = line[2:] if line.startswith("# ") else line
+              if not s.startswith(prefix):
+                  return None
+              return s[len(prefix):].split("=")[0].split(" ")[0]
+
+          # 只统计当前真正启用（=y）的机型：已被排除的小闪存机型（写的是 is not set）不参与分组
+          enabled = sorted({d for l in lines
+                            if (d := dev_of(l)) and l.startswith(prefix) and l.rstrip().endswith("=y")})
+          all_devs = sorted({d for l in lines if (d := dev_of(l))})
+          total = len(enabled)
+          per, rem = divmod(total, groups)
+          if group < rem:
+              start, cnt = group * (per + 1), per + 1
+          else:
+              start, cnt = rem * (per + 1) + (group - rem) * per, per
+          keep = enabled[start:start + cnt]
+          keepset = set(keep)
+
+          # 关键：非本组的机型必须显式写 "# ... is not set"，不能直接删行。
+          # 删掉后 make defconfig 会按 target 的默认值重新展开 ALL_PROFILES，
+          # 被排除的小闪存机型（以及别的组的机型）会被重新打开。
+          out = [l for l in lines if dev_of(l) is None]
+          out += ["%s%s=y\n" % (prefix, d) for d in keep]
+          out += ["# %s%s is not set\n" % (prefix, d) for d in all_devs if d not in keepset]
+          open(".config", "w", encoding="utf-8", errors="surrogateescape").writelines(out)
+          print("分组 %d/%d：启用机型共 %d 款，本组保留 %d 款（第 %d~%d 款）"
+                % (group + 1, groups, total, cnt, start + 1, start + cnt))
+          for d in keep:
+              print("   keep", d)
+          PYEOF
+          make defconfig
+
+          echo "===== 本组启用的机型 ====="
           n=$(grep -cE '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config || true)
-          echo "启用机型: $n（下限 $MIN_DEVICES）"
+          echo "本组机型数: $n（下限 $MIN_DEVICES_PER_GROUP）"
           grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config | head -5
-          [ "$n" -ge "$MIN_DEVICES" ] || { echo "::error::机型数量不足，实际 $n"; exit 1; }
+          [ "$n" -ge "$MIN_DEVICES_PER_GROUP" ] \
+            || { echo "::error::本组机型数不足，实际 $n（检查分组脚本）"; exit 1; }
+          grep -q '^CONFIG_TARGET_mediatek_filogic=y' .config || { echo "::error::target 未生效"; exit 1; }
           # 抽查排除是否真的生效：11/15 那次 gatonetworks_gdsp 在排除名单里却still编了
           # sdcard.img.gz，超限后把整轮构建带崩，这里至少把没排掉的机型打出来
           still=""
@@ -203,7 +290,11 @@ jobs:
           else
             echo "✔ 小闪存机型已全部排除"
           fi
-          grep -q '^CONFIG_TARGET_mediatek_filogic=y' .config || { echo "::error::target 未生效"; exit 1; }
+          if grep -q '^CONFIG_CCACHE=y$' .config; then
+            echo "✔ ccache 已启用（缓存目录 openwrt/.ccache，上限 $CCACHE_MAXSIZE）"
+          else
+            echo "::warning::CONFIG_CCACHE 未生效，本次不走 ccache"
+          fi
 
       - name: 编译固件
         run: |
@@ -241,11 +332,8 @@ jobs:
               else
                 case "$pkg" in
                   target/linux)
-                    # 全机型发布：个别机型自己的镜像超限会让整轮白编。
-                    # 典型是 gatonetworks_gdsp 这类 IMAGE_SIZE=32M 的机器，
-                    # ARTIFACT/sdcard.img.gz 里 check-size 发现超限后 rm -f 删掉产物，
-                    # 紧接着的 gzip 就报 "No such file or directory" → make Error 1。
-                    # 这里用 make -k 把其余 100+ 机型尽量生成，只把失败机型记进日志。
+                    # 本组机型少，个别机型镜像超限不再拖垮整轮：
+                    # 用 make -k 把其余机型尽量生成，只把失败机型记进日志
                     echo "::warning::target/install 仍失败，改用 make -k 继续生成其余机型" | tee -a build.log
                     make -k -j1 target/install 2>&1 \
                       | grep -E "WARNING: Image file .* is too big|Error [0-9]+|ERROR: |No such file" \
@@ -271,13 +359,16 @@ jobs:
             fi
           done
           [ "$ok" = 1 ] || { echo "::error::编译 3 轮后仍未成功"; exit 1; }
+          echo "===== ccache 统计（缓存目录 openwrt/.ccache）====="
+          CCACHE_DIR="$PWD/.ccache" ccache -s 2>&1 | head -20 || true
           df -hT
 
       - name: 上传编译日志（失败时）
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          # 4 个 job 并发，artifact 名必须唯一，否则 v4 直接报重名
+          name: build-log-g${{ matrix.group }}
           path: |
             openwrt/build.log
             openwrt/logs/
@@ -302,50 +393,44 @@ jobs:
           [ "$cnt" -ge 3 ] || { echo "::error::产物为空，疑似假成功"; exit 1; }
           DU=$(du -sh out | cut -f1)
           echo "size=$DU" >> "$GITHUB_OUTPUT"
+          echo "本组机型数: $(grep -cE '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' openwrt/.config || true)"
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: kwrt-mt7981-images
+          name: kwrt-mt7981-images-g${{ matrix.group }}
           path: out/
           retention-days: 14
 
       - name: 发布 Release
-        id: pub
-        # 失败不判死，交给下面 gh CLI 重试（二次限流很常见）
-        continue-on-error: true
+        # 4 个分组并发写同一个 tag，所以不用 softprops（它建 tag 会互相 422），
+        # 改成 gh CLI：create 失败就用已存在的，upload 用 --clobber 幂等
         if: ${{ github.event_name == 'schedule' || inputs.make_release != false }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.TAG_PREFIX }}-${{ env.DATE }}
-          name: Kwrt MT7981 (Filogic 820) (${{ env.DATE }})
-          body: |
-            Kwrt MT7981 (Filogic 820) 自动编译（mt7981）
-
-            - 源码: openwrt/openwrt `openwrt-25.12` + Kwrt `devices/common` 定制
-            - 机型: MT7981 (Filogic 820) 全部机型（仅目标芯片，共 118 款）
-            - 默认 IP: 10.0.0.1 / 用户名 root / 无密码
-            - 工作流: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          files: out/*
-          fail_on_unmatched_files: false
-
-      - name: 重试上传 Release 资产（GitHub 二次限流兜底）
-        if: ${{ steps.pub.outcome == 'failure' && !cancelled() }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
-          tag="${{ env.TAG_PREFIX }}-${{ env.DATE }}"
-          title="Kwrt MT7981 (Filogic 820) (${{ env.DATE }})"
-          echo ">>> 目标 tag: $tag"
+          tag="${TAG_PREFIX}-${DATE}"
+          title="Kwrt MT7981 (Filogic 820) (${DATE})"
+          mkdir -p rel
+          shopt -s nullglob
+          for f in out/*.bin out/*.itb out/*.ubi; do cp -f "$f" rel/; done
+          # profiles.json / sha256sums 各组都会生成且内容只含本组机型，
+          # 直接用原名上传会互相覆盖，这里加组号区分
+          cp -f out/sha256sums "rel/sha256sums-g${GROUP}" 2>/dev/null || true
+          cp -f out/profiles.json "rel/profiles-g${GROUP}.json" 2>/dev/null || true
+          echo "本组待发布: $(ls rel | wc -l) 个文件（tag: $tag）"
+          # 错开 0~20 秒，降低 4 个分组同时 create tag 的撞车概率
+          sleep $(( RANDOM % 20 ))
           for i in 1 2 3 4 5; do
             echo ">>> 第 $i 次尝试上传"
             if ! gh release view "$tag" > /dev/null 2>&1; then
               gh release create "$tag" --title "$title" --notes "见 Actions 运行记录 ${{ github.run_id }}" || true
+              sleep 3
             fi
-            if gh release upload "$tag" out/* --clobber; then
+            if gh release upload "$tag" rel/* --clobber; then
               echo ">>> 上传成功（第 $i 次）"
               exit 0
             fi
@@ -354,3 +439,13 @@ jobs:
           done
           echo "::error::Release 资产上传仍失败（多为 GitHub 二次限流），产物已保留在 Actions artifact 里"
           exit 1
+
+      - name: 保存 ccache 缓存
+        # 只让 g0 保存：4 组编的包完全一致，一份缓存就够，
+        # 全存会很快吃满仓库 10GB 缓存额度
+        if: matrix.group == 0 && !cancelled()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: openwrt/.ccache
+          key: ccache-${{ env.TARGET }}-${{ github.run_id }}-g${{ matrix.group }}
