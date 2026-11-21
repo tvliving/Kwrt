@@ -92,6 +92,27 @@ def main():
                 fh.write(fixed)
     print("[ok] DTS 安装 %d 个，保留源码树已有 %d 个，SoC dtsi=%s" % (len(installed), kept, soc))
 
+    # 1.5) include 预检：包内 dts 引用的 "xxx.dtsi" 必须能解析到，否则 50 分钟后才在
+    #      target/linux/install 阶段炸（fatal error: xxx: No such file or directory）
+    missing = []
+    for name in pack_dts:
+        path = os.path.join(dstdir, name)
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for inc in re.findall(r'#include\s+"([^"]+)"', text):
+            if inc in pack_names or os.path.exists(os.path.join(dstdir, inc)):
+                continue
+            missing.append((name, inc))
+    if missing:
+        for src, inc in missing:
+            print("[ERROR] %s 引用了不存在的 %s" % (src, inc))
+        print("::error::设备包 include 不完整，请补齐上面的 .dtsi 后重试")
+        return 2
+    print("[ok] DTS include 预检通过")
+
     # 2) filogic.mk 追加设备定义（同名 Device 已存在则跳过）
     mk = os.path.join(mtk, "image/filogic.mk")
     with open(os.path.join(pack, "mk.fragment"), encoding="utf-8") as fh:
