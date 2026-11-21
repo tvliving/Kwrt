@@ -93,6 +93,7 @@ jobs:
           grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config || {
             echo "::error::机型未生效，检查 filogic.mk 是否含对应 Device 定义"; exit 1; }
           grep -q '^CONFIG_PACKAGE_luci-theme-vantage=y$' .config || { echo "::error::vantage 主题未生效"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_luci=y$' .config || { echo "::error::LuCI 主集合未选中，刷机后页面会缺失"; exit 1; }
           if grep -qE '^CONFIG_PACKAGE_luci-theme-(argon|bootstrap|material)=y$' .config; then
             echo "::error::仍有其他预装主题（只允许 luci-theme-vantage）"; exit 1; fi
           echo "---- 中文/商店 ----"

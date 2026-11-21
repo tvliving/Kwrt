@@ -30,7 +30,9 @@ fi
 
 echo "== 5/5 写入配置与默认主题 =="
 cat >> .config <<'EOF'
+CONFIG_PACKAGE_luci=y
 CONFIG_PACKAGE_luci-theme-vantage=y
+CONFIG_PACKAGE_luci-theme-bootstrap=n
 CONFIG_PACKAGE_luci-theme-argon=n
 CONFIG_PACKAGE_luci-app-argon-config=n
 CONFIG_LUCI_LANG_zh_Hans=y
@@ -48,12 +50,14 @@ EOF
 mkdir -p files/etc/uci-defaults
 cat > files/etc/uci-defaults/99-default-theme <<'EOF'
 #!/bin/sh
+# 首启默认值：主题 vantage、界面语言简体中文、iStore 依赖的 taskd 自启
 uci -q batch <<-EOT
 	set luci.main.mediaurlbase='/luci-static/vantage'
+	set luci.main.lang='zh_cn'
 	commit luci
 EOT
+[ -x /etc/init.d/taskd ] && { /etc/init.d/taskd enable; /etc/init.d/taskd start; }
 exit 0
 EOF
 chmod +x files/etc/uci-defaults/99-default-theme
 echo "[done] customize"
-
