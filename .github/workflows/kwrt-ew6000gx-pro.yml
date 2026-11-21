@@ -100,6 +100,8 @@ jobs:
           grep -q '^CONFIG_PACKAGE_luci-i18n-base-zh-cn=y$' .config || { echo "::error::LuCI 基础中文包未生效"; exit 1; }
           echo "---- store 诊断 ----"
           grep -n 'luci-app-store' .config | head -5 || true
+          grep -q '^CONFIG_PACKAGE_xz-utils=y$' .config \
+            || echo "::warning::xz-utils 未生效（luci-app-store 的 TAR_XZ 依赖不满足，会被 kconfig 丢弃）"
           grep -q '^CONFIG_PACKAGE_luci-app-store=y$' .config || {
             grep -A12 'config PACKAGE_luci-app-store' tmp/.config-package.in | head -20 || true
             echo "::error::iStore 市场未生效"; exit 1; }

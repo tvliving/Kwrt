@@ -35,15 +35,15 @@ CONFIG_PACKAGE_luci-theme-argon=n
 CONFIG_PACKAGE_luci-app-argon-config=n
 CONFIG_LUCI_LANG_zh_Hans=y
 CONFIG_PACKAGE_luci-app-store=y
-CONFIG_PACKAGE_luci-lib-taskd=y
-CONFIG_PACKAGE_luci-lib-xterm=y
-CONFIG_PACKAGE_taskd=y
-CONFIG_PACKAGE_libuci-lua=y
-CONFIG_PACKAGE_curl=y
-CONFIG_PACKAGE_tar=y
-CONFIG_PACKAGE_mount-utils=y
-CONFIG_PACKAGE_xz-utils=y
 CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+# iStore 的守卫依赖（缺一个 kconfig 就把 luci-app-store 整条丢掉，.config 里查不到该符号）：
+#   depends on !(PACKAGE_TAR_XZ) || PACKAGE_xz-utils
+# tar 被 select 进来后 TAR_XZ 默认 =y，所以必须显式选 xz-utils。
+# 2026-11-21 RG-EW6000GX Pro 首次构建即因此失败（step「校验机型与主题并 defconfig」报 iStore 未生效）。
+CONFIG_PACKAGE_xz-utils=y
+CONFIG_PACKAGE_luci-lib-taskd=y
+CONFIG_PACKAGE_taskd=y
+CONFIG_PACKAGE_luci-lua-runtime=y
 EOF
 mkdir -p files/etc/uci-defaults
 cat > files/etc/uci-defaults/99-default-theme <<'EOF'
@@ -56,3 +56,4 @@ exit 0
 EOF
 chmod +x files/etc/uci-defaults/99-default-theme
 echo "[done] customize"
+
