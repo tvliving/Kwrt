@@ -153,16 +153,27 @@ def main():
             added.append(name)
     print("[ok] filogic.mk 追加 %s" % (added or "无"))
 
-    # 3) files/ 覆盖层（board.d 网口映射、固件等）
+    # 3) files/ 覆盖层（board.d 网口映射等）
+    #    目标必须是 <源码根>/files/...：OpenWrt 的 overlay 目录就叫 files，
+    #    直接铺到源码根（如 <root>/etc/board.d）不会被任何阶段读取（旧实现就是这个问题，
+    #    board.d 脚本从来没生效，WAN 口因此缺失）。
     files = os.path.join(pack, "files")
     if os.path.isdir(files):
+        overlay = os.path.join(root, "files")
+        count = 0
         for dirpath, _, fnames in os.walk(files):
             rel = os.path.relpath(dirpath, files)
-            dst_dir = os.path.join(root, rel) if rel != "." else root
+            dst_dir = overlay if rel == "." else os.path.join(overlay, rel)
             os.makedirs(dst_dir, exist_ok=True)
             for fn in fnames:
-                shutil.copyfile(os.path.join(dirpath, fn), os.path.join(dst_dir, fn))
-        print("[ok] 覆盖 files/ 资源")
+                src = os.path.join(dirpath, fn)
+                dst = os.path.join(dst_dir, fn)
+                shutil.copyfile(src, dst)
+                # board.d / uci-defaults 必须可执行，否则 board_detect 会直接跳过
+                if any(k in rel for k in ("board.d", "uci-defaults")) or fn.endswith(".sh"):
+                    os.chmod(dst, 0o755)
+                count += 1
+        print("[ok] 覆盖 files/ 资源 %d 个 -> %s" % (count, overlay))
 
     print("[done] %s" % slug)
     return 0
