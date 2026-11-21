@@ -51,6 +51,22 @@ CONFIG_PACKAGE_luci-lib-taskd=y
 CONFIG_PACKAGE_taskd=y
 CONFIG_PACKAGE_luci-lua-runtime=y
 EOF
+
+echo "== 5.5/6 追加机型附加包（packages.txt 单点维护） =="
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PKGLIST="$HERE/devices-pack/ew6000gx/packages.txt"
+if [ -f "$PKGLIST" ]; then
+  n=0
+  while IFS= read -r pkg || [ -n "$pkg" ]; do
+    pkg="$(printf '%s' "$pkg" | tr -d '\r' | sed 's/[[:space:]]*$//')"
+    case "$pkg" in ''|'#'*) continue ;; esac
+    echo "CONFIG_PACKAGE_${pkg}=y" >> .config
+    n=$((n + 1))
+  done < "$PKGLIST"
+  echo "[info] 附加包 $n 个（$PKGLIST）"
+else
+  echo "::warning::未找到 $PKGLIST，跳过附加包"
+fi
 mkdir -p files/etc/uci-defaults
 cat > files/etc/uci-defaults/99-default-theme <<'EOF'
 #!/bin/sh

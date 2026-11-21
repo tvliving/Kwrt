@@ -1,0 +1,90 @@
+# ew6000gx 机型附加包清单（customize.sh 逐行转成 CONFIG_PACKAGE_<name>=y）
+#
+# 说明：
+#   * 这些包必须存在于本次构建启用的 feed（默认 feed + istore + vantage）里。
+#     若某个包不存在或依赖不满足，kconfig 会静默丢弃该符号 —— 工作流的
+#     「包体检」步骤会把它列出来，不会让你白等一小时。
+#   * 之前镜像只有 9MB 的根因就是 .config 里只选了 13 个包，且基础机型
+#     的 DEVICE_PACKAGES 没有 Wi-Fi 驱动（只有 ubootmod 那份带）。
+#
+# ---- Wi-Fi 驱动（MT7986 = mt7915e + mt7986 固件 + WO 固件）----
+kmod-mt7915e
+kmod-mt7986-firmware
+mt7986-wo-firmware
+kmod-phy-airoha-en8811h
+
+# ---- LuCI 基础 ----
+luci
+luci-base
+luci-mod-admin-full
+luci-mod-status
+luci-mod-system
+luci-mod-network
+uhttpd
+uhttpd-mod-ubus
+luci-proto-pppoe
+luci-proto-wireguard
+
+# ---- 主题 / 应用商店 ----
+luci-theme-vantage
+luci-app-store
+luci-lib-taskd
+taskd
+luci-lua-runtime
+xz-utils
+
+# ---- 常用应用 ----
+luci-app-firewall
+luci-app-package-manager
+luci-app-commands
+luci-app-ttyd
+luci-app-uhttpd
+luci-app-wol
+luci-app-ddns
+luci-app-upnp
+luci-app-sqm
+luci-app-nlbwmon
+luci-app-vnstat2
+luci-app-wifischedule
+luci-app-aria2
+
+# ---- 中文语言包 ----
+luci-i18n-base-zh-cn
+luci-i18n-firewall-zh-cn
+luci-i18n-package-manager-zh-cn
+luci-i18n-commands-zh-cn
+luci-i18n-ttyd-zh-cn
+luci-i18n-uhttpd-zh-cn
+luci-i18n-wol-zh-cn
+luci-i18n-ddns-zh-cn
+luci-i18n-upnp-zh-cn
+luci-i18n-sqm-zh-cn
+luci-i18n-nlbwmon-zh-cn
+luci-i18n-vnstat2-zh-cn
+luci-i18n-wifischedule-zh-cn
+luci-i18n-aria2-zh-cn
+
+# ---- 系统工具 ----
+curl
+ca-certificates
+bash
+nano
+htop
+openssh-sftp-server
+block-mount
+usbutils
+pciutils
+ethtool
+iperf3
+tcpdump
+mtr
+socat
+lsof
+unzip
+ip-full
+ipset
+iptables-nft
+kmod-tun
+kmod-wireguard
+wireguard-tools
+kmod-tcp-bbr

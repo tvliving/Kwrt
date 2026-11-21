@@ -117,6 +117,21 @@ jobs:
             grep -A12 'config PACKAGE_luci-app-store' tmp/.config-package.in | head -20 || true
             echo "::error::iStore 市场未生效"; exit 1; }
 
+      - name: 包体检（列出被 kconfig 丢弃的包）
+        run: |
+          cd openwrt
+          miss=0
+          while IFS= read -r p; do
+            p="$(printf '%s' "$p" | tr -d '\r' | sed 's/[[:space:]]*$//')"
+            case "$p" in ''|'#'*) continue ;; esac
+            grep -q "^CONFIG_PACKAGE_${p}=y$" .config || { echo "::warning::包未生效: $p"; miss=$((miss+1)); }
+          done < ../devices-pack/ew6000gx/packages.txt
+          total=$(grep -c '^CONFIG_PACKAGE_.*=y$' .config || true)
+          echo "选中包总数: $total ；被丢弃: $miss"
+          for k in luci uhttpd luci-mod-admin-full luci-theme-vantage luci-app-store kmod-mt7915e; do
+            grep -q "^CONFIG_PACKAGE_${k}=y$" .config || { echo "::error::关键包缺失: $k"; exit 1; }
+          done
+
       - name: 关闭 BTF（规避 tools/dwarves 构建失败）
         run: |
           cd openwrt
@@ -158,6 +173,9 @@ jobs:
           # 多分区 U-Boot 只需要一个 sysupgrade 刷机包
           n=$(ls out | grep -c 'ew-6000gx') || true
           [ "$n" = "1" ] || { echo "::error::应当只有 1 个刷机包，实际 $n 个"; ls -l out; exit 1; }
+          # 体积守卫：包没进镜像时（历史问题：只剩 9MB）直接失败，不再静默发空壳包
+          size=$(stat -c %s out/*ew-6000gx*.bin | sort -n | tail -1)
+          [ "$size" -ge 18000000 ] || { echo "::error::镜像仅 $((size/1048576))MB，明显缺包（预期 >=18MB）"; ls -l out; exit 1; }
           ls out | grep -q '^kwrt-.*ew-6000gx' \
             || { echo "::error::产物名不是 kwrt-* 前缀"; ls -l out; exit 1; }
           (cd out && sha256sum ./* > sha256sums.txt) 2>/dev/null || true
