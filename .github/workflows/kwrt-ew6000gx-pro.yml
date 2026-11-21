@@ -133,8 +133,8 @@ jobs:
           total=$(grep -c '^CONFIG_PACKAGE_.*=y$' .config || true)
           echo "选中包总数: $total ；被丢弃: $miss"
           for k in luci uhttpd luci-mod-admin-full luci-theme-vantage luci-app-store \
-                   kmod-mt7915e kmod-mt7986-firmware iwinfo \
-                   luci-compat luci-lua-runtime luci-app-quickstart quickstart; do
+                   luci-mod-status kmod-mt7915e kmod-mt7986-firmware iwinfo \
+                   luci-compat luci-lua-runtime; do
             grep -q "^CONFIG_PACKAGE_${k}=y$" .config || { echo "::error::关键包缺失: $k"; exit 1; }
           done
           # wpad 变体随仓库默认不同，只要有一个 hostapd 套件就行
@@ -222,9 +222,15 @@ jobs:
           grep -E '^DISTRIB_(ID|DESCRIPTION)=' /tmp/rootfs/etc/openwrt_release || true
           grep -q "^DISTRIB_ID=.*Kwrt" /tmp/rootfs/etc/openwrt_release \
             || { echo "::error::发行版不是 Kwrt（LuCI 登录页会显示 OpenWrt）"; exit 1; }
-          echo "---- 首页 ----"
-          test -f /tmp/rootfs/usr/lib/lua/luci/controller/quickstart.lua \
-            || { echo "::error::缺少 quickstart 首页 controller"; exit 1; }
+          echo "---- 首页（标准 LuCI：状态-概览）----"
+          test -f /tmp/rootfs/www/luci-static/resources/view/status/overview.js \
+            || test -f /tmp/rootfs/usr/lib/lua/luci/controller/admin/status.lua \
+            || { echo "::error::缺少 LuCI 状态/概览页，登录后会白屏"; exit 1; }
+          test -d /tmp/rootfs/www/luci-static/vantage \
+            || { echo "::error::缺少 vantage 主题静态资源，侧边栏会丢失"; exit 1; }
+          if [ -e /tmp/rootfs/usr/lib/lua/luci/controller/quickstart.lua ]; then
+            echo "::error::镜像里仍有 quickstart 首页（会导致 XHR 报错+无侧边栏）"; exit 1
+          fi
           echo "---- 网口映射 ----"
           test -x /tmp/rootfs/etc/board.d/02_network_ruijie \
             || { echo "::error::缺少 board.d 网口映射（WAN 会缺失）"; exit 1; }
@@ -261,7 +267,7 @@ jobs:
             - 文件名前缀固定为仓库名（kwrt-*），不再产出 openwrt-* 副本
             - 定时：每周六 09:00（北京时间）
             - 主题：luci-theme-vantage（已移除 argon），首启默认中文界面，左侧导航默认展开
-            - 内置：iStore 软件中心 + quickstart 首页仪表盘 + 简体中文语言包
+            - 内置：iStore 软件中心 + 简体中文语言包；登录后进入标准 LuCI 概览（侧边栏正常）
             - 网口：LAN=lan1-lan4，WAN=eth1（2.5G Airoha EN8811H），后台 192.168.110.1
             - 布局：107M UBI + sysupgrade-tar（沿用原厂 U-Boot）
             - 运行记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

@@ -15,7 +15,10 @@ root="${1:-.}"
 cd "$root"
 
 CTRL=package/luci-app-quickstart/luasrc/controller/quickstart.lua
-[ -f "$CTRL" ] || { echo "::error::未找到 $CTRL，请先把 luci-app-quickstart vendor 到 package/"; exit 1; }
+if [ ! -f "$CTRL" ]; then
+  echo "[skip] 未 vendor luci-app-quickstart，跳过 quickstart 首页修复（当前用标准 LuCI 首页）"
+  exit 0
+fi
 
 echo "== quickstart 修复：默认首页 + 中文菜单 + 守护进程自启 =="
 

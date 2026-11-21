@@ -49,10 +49,8 @@ CONFIG_PACKAGE_xz-utils=y
 CONFIG_PACKAGE_luci-lib-taskd=y
 CONFIG_PACKAGE_taskd=y
 CONFIG_PACKAGE_luci-lua-runtime=y
-# 首页仪表盘（quickstart 是 Lua 应用，需要 luci-compat + lua 运行时）
+# luci-compat / lua 运行时：iStore 与部分老式 Lua 页面仍然需要
 CONFIG_PACKAGE_luci-compat=y
-CONFIG_PACKAGE_luci-app-quickstart=y
-CONFIG_PACKAGE_quickstart=y
 CONFIG_PACKAGE_luci-app-ttyd=y
 CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn=y
 EOF
@@ -122,20 +120,12 @@ if [ -f package/base-files/image-config.in ]; then
   fi
 fi
 
-echo "== 7/7 首页仪表盘 + 默认展开左侧导航 =="
-# 7.1 首页：quickstart（与 lede 各机型同一套，kiddin9/op-packages）
-if [ ! -f package/luci-app-quickstart/Makefile ] || [ ! -f package/quickstart/Makefile ]; then
-  tmp="$(mktemp -d)"
-  git clone -q --depth 1 --filter=blob:none --sparse \
-    https://github.com/kiddin9/op-packages.git "$tmp/repo"
-  git -C "$tmp/repo" sparse-checkout set luci-app-quickstart quickstart
-  for p in luci-app-quickstart quickstart; do
-    rm -rf "package/feeds/istore/$p" "package/feeds/luci/$p" "package/$p"
-    cp -a "$tmp/repo/$p" "package/$p"
-  done
-  rm -rf "$tmp"
-fi
-bash "$(dirname "$0")/quickstart-fix.sh" .
+echo "== 7/7 默认展开左侧导航 =="
+# 7.0 首页：不再 vendor kidin9/op-packages 的 quickstart。实机验证它的 home.htm
+#     是靠 /admin/quickstart/* 的 XHR 拉数据的独立单页壳子，精简固件里后端起不来，
+#     XHR 一失败整页只剩「正在加载首页...」，vantage 的侧边栏（由页面自身渲染）
+#     也跟着消失。恢复标准 LuCI：状态-概览 作为登录后首页，菜单/侧边栏正常。
+echo "[ok] 使用标准 LuCI 首页（状态-概览），不引入 quickstart"
 
 # 7.2 vantage 左侧是图标栏（rail），默认收起、点「Expand navigation」才展开，
 #     状态存在 localStorage 的 vantage.rail。这里把默认值改成展开（pinned）；
