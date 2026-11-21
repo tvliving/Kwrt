@@ -147,8 +147,8 @@ jobs:
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.SLUG }}-${{ github.run_number }}
-          name: Kwrt RG-EW6000GX Pro build ${{ github.run_number }}
+          tag_name: kwrt-${{ env.SLUG }}-${{ github.run_number }}
+          name: Kwrt EW-6000GX Pro build ${{ github.run_number }}
           body: |
             自动构建：tvliving/Kwrt / ruijie_ew-6000gx-pro（MT7986A）
             - 定时：每周六 09:00（北京时间）
