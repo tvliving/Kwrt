@@ -206,6 +206,13 @@ jobs:
           (cd out && sha256sum ./* > sha256sums.txt) 2>/dev/null || true
           ls -lh out
 
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kwrt-${{ env.SLUG }}-${{ github.run_number }}
+          path: out/
+          retention-days: 14
+
       - name: 镜像体检（品牌 / 首页 / 无线驱动是否真的进包）
         run: |
           sudo apt-get -qq install -y squashfs-tools >/dev/null 2>&1 || true
@@ -218,37 +225,53 @@ jobs:
           # 但对只读校验没有影响，这里忽略退出码，改为检查关键目录是否解出来。
           unsquashfs -q -d /tmp/rootfs "$root" >/dev/null 2>&1 || true
           [ -d /tmp/rootfs/etc ] || { echo "::error::rootfs 解包失败"; ls -l /tmp/img; exit 1; }
+
+          # 逐项体检：一次跑完所有检查并汇总，避免第一项失败就看不到其余信息
+          bad=0
+          ok()   { echo "  [OK]   $*"; }
+          fail() { echo "  [FAIL] $*"; bad=$((bad + 1)); }
+          warn() { echo "  [WARN] $*"; }
+
           echo "---- 发行版 ----"
           grep -E '^DISTRIB_(ID|DESCRIPTION)=' /tmp/rootfs/etc/openwrt_release || true
           grep -q "^DISTRIB_ID=.*Kwrt" /tmp/rootfs/etc/openwrt_release \
-            || { echo "::error::发行版不是 Kwrt（LuCI 登录页会显示 OpenWrt）"; exit 1; }
+            && ok "发行版 Kwrt" || fail "发行版不是 Kwrt（登录页会显示别的名字）"
+
           echo "---- 首页（标准 LuCI：状态-概览）----"
-          test -f /tmp/rootfs/www/luci-static/resources/view/status/overview.js \
-            || test -f /tmp/rootfs/usr/lib/lua/luci/controller/admin/status.lua \
-            || { echo "::error::缺少 LuCI 状态/概览页，登录后会白屏"; exit 1; }
-          test -d /tmp/rootfs/www/luci-static/vantage \
-            || { echo "::error::缺少 vantage 主题静态资源，侧边栏会丢失"; exit 1; }
-          if [ -e /tmp/rootfs/usr/lib/lua/luci/controller/quickstart.lua ]; then
-            echo "::error::镜像里仍有 quickstart 首页（会导致 XHR 报错+无侧边栏）"; exit 1
+          ls /tmp/rootfs/www/luci-static/resources/view/status/ 2>/dev/null | head -20 || true
+          if test -f /tmp/rootfs/www/luci-static/resources/view/status/index.js || grep -q luci-mod-status /tmp/rootfs/lib/apk/db/installed 2>/dev/null; then
+            ok "状态-概览页存在"
+          else
+            fail "缺少 LuCI 状态/概览页（登录后没有首页）"
           fi
+
+          test -d /tmp/rootfs/www/luci-static/vantage \
+            && ok "vantage 主题静态资源存在" || fail "缺少 vantage 静态资源（侧边栏会丢失）"
+
+          if [ -e /tmp/rootfs/usr/lib/lua/luci/controller/quickstart.lua ]; then
+            fail "镜像里仍有 quickstart 首页（会 XHR 报错 + 无侧边栏）"
+          else
+            ok "无 quickstart 残留"
+          fi
+
           echo "---- 网口映射 ----"
           test -x /tmp/rootfs/etc/board.d/02_network_ruijie \
-            || { echo "::error::缺少 board.d 网口映射（WAN 会缺失）"; exit 1; }
+            && ok "board.d 网口映射可执行" || fail "缺少 board.d 网口映射（WAN 会缺失）"
+
           echo "---- 无线 ----"
           ls /tmp/rootfs/lib/modules/*/mt7915e.ko >/dev/null 2>&1 \
-            || { echo "::error::缺少 mt7915e 驱动（无线菜单不会出现）"; exit 1; }
+            && ok "mt7915e 驱动在镜像里" || fail "缺少 mt7915e 驱动（无线菜单不会出现）"
           ls /tmp/rootfs/lib/firmware/mediatek/mt7986_* 2>/dev/null | head -3 || true
+
           echo "---- 主题 ----"
           grep -q "'pinned'" /tmp/rootfs/usr/share/ucode/luci/template/themes/vantage/header.ut 2>/dev/null \
-            && echo "左侧导航默认展开：已生效" \
-            || echo "::warning::未确认左侧导航默认展开"
+            && ok "左侧导航默认展开" || warn "未确认左侧导航默认展开"
 
-      - name: 上传 artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: kwrt-${{ env.SLUG }}-${{ github.run_number }}
-          path: out/
-          retention-days: 14
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::镜像体检发现 $bad 项问题（详见上方 [FAIL]），镜像已作为 artifact 保存"
+            exit 1
+          fi
+          echo "镜像体检全部通过"
 
       - name: 计算发布标签（每机型每周一个 Release）
         if: success()
