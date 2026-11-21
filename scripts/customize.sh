@@ -76,10 +76,13 @@ mkdir -p files/etc/uci-defaults
 cat > files/etc/uci-defaults/99-default-theme <<'EOF'
 #!/bin/sh
 # 首启默认值：主题 vantage、界面语言简体中文、iStore 依赖的 taskd 自启
+# hostname 也要改：vantage 登录页的大标题直接显示 hostname，不改就是 OpenWrt
 uci -q batch <<-EOT
 	set luci.main.mediaurlbase='/luci-static/vantage'
 	set luci.main.lang='zh_cn'
 	commit luci
+	set system.@system[0].hostname='Kwrt'
+	commit system
 EOT
 [ -x /etc/init.d/taskd ] && { /etc/init.d/taskd enable; /etc/init.d/taskd start; }
 # LuCI 的 web 入口与 rpcd 必须开机自启，否则刷完只有 ssh 能进
