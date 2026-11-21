@@ -69,6 +69,10 @@ jobs:
           python3 scripts/apply-pack.py openwrt "$SLUG"
           grep -n "ew-6000gx" openwrt/target/linux/mediatek/image/filogic.mk | tail -6
           ls openwrt/target/linux/mediatek/dts/ | grep -i 6000gx
+          # 网口映射（WAN=eth1）：没有它，未识别的机型不会生成 wan 接口
+          test -f openwrt/files/etc/board.d/02_network_ruijie \
+            || { echo "::error::缺少 board.d 网口映射脚本"; exit 1; }
+          ls -l openwrt/files/etc/board.d/
 
       - name: 生成基础 .config
         run: |
@@ -128,7 +132,9 @@ jobs:
           done < ../devices-pack/ew6000gx/packages.txt
           total=$(grep -c '^CONFIG_PACKAGE_.*=y$' .config || true)
           echo "选中包总数: $total ；被丢弃: $miss"
-          for k in luci uhttpd luci-mod-admin-full luci-theme-vantage luci-app-store kmod-mt7915e; do
+          for k in luci uhttpd luci-mod-admin-full luci-theme-vantage luci-app-store \
+                   kmod-mt7915e kmod-mt7986-firmware iwinfo wpad-basic-mbedtls \
+                   luci-compat luci-lua-runtime luci-app-quickstart quickstart; do
             grep -q "^CONFIG_PACKAGE_${k}=y$" .config || { echo "::error::关键包缺失: $k"; exit 1; }
           done
 
@@ -140,6 +146,16 @@ jobs:
             echo "已关闭 CONFIG_KERNEL_DEBUG_INFO_BTF"
           fi
           make defconfig
+          # VERSION_DIST 会被 defconfig 重置，必须在最后一次 defconfig 之后再写。
+          # 只改名产物不够：/etc/openwrt_release 里的 DISTRIB_ID 也来自它，
+          # 不改就会导致 LuCI 登录页显示 OpenWrt（用户反馈的问题 2）。
+          sed -i '/^CONFIG_VERSION_DIST=/d' .config
+          echo 'CONFIG_VERSION_DIST="Kwrt"' >> .config
+          grep -q '^CONFIG_VERSION_DIST="Kwrt"$' .config \
+            || { echo "::error::VERSION_DIST 写入失败"; exit 1; }
+          grep -q 'default "Kwrt"' package/base-files/image-config.in \
+            || { echo "::error::image-config.in 默认发行版不是 Kwrt（登录页会显示 OpenWrt）"; exit 1; }
+          echo "品牌：$(grep '^CONFIG_VERSION_DIST=' .config)"
 
       - name: 编译
         run: |
@@ -181,6 +197,34 @@ jobs:
           (cd out && sha256sum ./* > sha256sums.txt) 2>/dev/null || true
           ls -lh out
 
+      - name: 镜像体检（品牌 / 首页 / 无线驱动是否真的进包）
+        run: |
+          sudo apt-get -qq install -y squashfs-tools >/dev/null 2>&1 || true
+          rm -rf /tmp/img /tmp/rootfs && mkdir -p /tmp/img
+          bin=$(ls out/*ew-6000gx*.bin | head -1)
+          tar -xf "$bin" -C /tmp/img
+          root=$(find /tmp/img -name root -o -name rootfs | head -1)
+          [ -n "$root" ] || { echo "::error::镜像里找不到 rootfs"; find /tmp/img -maxdepth 2 | head; exit 1; }
+          unsquashfs -q -d /tmp/rootfs "$root" >/dev/null
+          echo "---- 发行版 ----"
+          grep -E '^DISTRIB_(ID|DESCRIPTION)=' /tmp/rootfs/etc/openwrt_release || true
+          grep -q '^DISTRIB_ID="Kwrt"' /tmp/rootfs/etc/openwrt_release \
+            || { echo "::error::发行版不是 Kwrt（LuCI 登录页会显示 OpenWrt）"; exit 1; }
+          echo "---- 首页 ----"
+          test -f /tmp/rootfs/usr/lib/lua/luci/controller/quickstart.lua \
+            || { echo "::error::缺少 quickstart 首页 controller"; exit 1; }
+          echo "---- 网口映射 ----"
+          test -x /tmp/rootfs/etc/board.d/02_network_ruijie \
+            || { echo "::error::缺少 board.d 网口映射（WAN 会缺失）"; exit 1; }
+          echo "---- 无线 ----"
+          ls /tmp/rootfs/lib/modules/*/mt7915e.ko >/dev/null 2>&1 \
+            || { echo "::error::缺少 mt7915e 驱动（无线菜单不会出现）"; exit 1; }
+          ls /tmp/rootfs/lib/firmware/mediatek/mt7986_* 2>/dev/null | head -3 || true
+          echo "---- 主题 ----"
+          grep -q "'pinned'" /tmp/rootfs/usr/share/ucode/luci/template/themes/vantage/header.ut 2>/dev/null \
+            && echo "左侧导航默认展开：已生效" \
+            || echo "::warning::未确认左侧导航默认展开"
+
       - name: 上传 artifact
         uses: actions/upload-artifact@v4
         with:
@@ -204,8 +248,9 @@ jobs:
             - 每机型每周一个 Release，同周重跑覆盖同一个 tag，不会堆积多个版本
             - 文件名前缀固定为仓库名（kwrt-*），不再产出 openwrt-* 副本
             - 定时：每周六 09:00（北京时间）
-            - 主题：luci-theme-vantage（已移除 argon），首启默认中文界面
-            - 内置：iStore 软件中心 + 简体中文语言包
+            - 主题：luci-theme-vantage（已移除 argon），首启默认中文界面，左侧导航默认展开
+            - 内置：iStore 软件中心 + quickstart 首页仪表盘 + 简体中文语言包
+            - 网口：LAN=lan1-lan4，WAN=eth1（2.5G Airoha EN8811H），后台 192.168.110.1
             - 布局：107M UBI + sysupgrade-tar（沿用原厂 U-Boot）
             - 运行记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           files: out/*

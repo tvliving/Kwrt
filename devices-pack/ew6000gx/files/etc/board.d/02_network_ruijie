@@ -1,0 +1,28 @@
+#!/bin/sh
+# 锐捷 RG-EW6000GX Pro 网口映射（在 board.d/02_network 之后执行，覆盖默认）
+#
+# 硬件：MT7531 交换机的 lan1-lan4 + gmac1 接 Airoha EN8811H 2.5G PHY（eth1）
+# 上游 02_network 只有 ruijie,rg-x60-pro 分支，本机型不匹配时会落到「无 WAN」的
+# 默认配置，所以这里显式补上 LAN/WAN 与 MAC 地址（与 rg-x60-pro 同源）。
+. /lib/functions.sh
+. /lib/functions/uci-defaults.sh
+. /lib/functions/system.sh
+
+case "$(board_name)" in
+ruijie,ew-6000gx-pro*)
+	ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "eth1"
+
+	# MAC 在 product_info 分区的 ethaddr 文本里（原厂标贴地址）
+	label_mac=$(mtd_get_mac_ascii product_info ethaddr)
+	if [ -n "$label_mac" ]; then
+		ucidef_set_interface_macaddr "wan" "$label_mac"
+		ucidef_set_interface_macaddr "lan" "$(macaddr_add "$label_mac" 1)"
+	fi
+
+	# 02_network 已经 flush 过（/etc/board.json 已生成），这里必须自己 commit，
+	# 否则 uci 改动只在内存里，重启就回到「无 WAN」状态。
+	uci -q commit network
+	;;
+esac
+
+exit 0

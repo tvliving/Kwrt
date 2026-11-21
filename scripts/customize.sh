@@ -1,25 +1,25 @@
 #!/bin/bash
-# 主题换 vantage + 去 argon + iStore + 中文包（在源码根目录执行）
+# 主题换 vantage + 去 argon + iStore + 中文包 + 首页仪表盘（在源码根目录执行）
 set -e
 cd "${1:-.}"
 
-echo "== 1/5 移除 argon =="
+echo "== 1/7 移除 argon =="
 rm -rf feeds/luci/themes/luci-theme-argon feeds/luci/applications/luci-app-argon-config \
        package/luci-theme-argon package/luci-app-argon-config
 
-echo "== 2/5 引入 luci-theme-vantage =="
+echo "== 2/7 引入 luci-theme-vantage =="
 if [ ! -d package/luci-theme-vantage ]; then
   git clone --depth 1 https://github.com/anothaDev/luci-theme-vantage package/luci-theme-vantage
 fi
 
-echo "== 3/5 引入 iStore feed =="
+echo "== 3/7 引入 iStore feed =="
 grep -q '^src-git istore ' feeds.conf.default || \
   echo 'src-git istore https://github.com/linkease/istore.git' >> feeds.conf.default
 ./scripts/feeds update -a
 ./scripts/feeds install -a -p istore || true
 ./scripts/feeds install -a
 
-echo "== 4/5 默认主题替换 =="
+echo "== 4/7 默认主题替换 =="
 for f in feeds/luci/collections/luci/Makefile feeds/luci/collections/luci-light/Makefile; do
   [ -f "$f" ] && sed -i 's/luci-theme-argon/luci-theme-vantage/g; s/luci-theme-bootstrap/luci-theme-vantage/g' "$f" || true
 done
@@ -28,7 +28,7 @@ if [ -f feeds/luci/luci.mk ]; then
   sed -i 's/^# \$(foreach lang,\$(LUCI_LANGUAGES)/$(foreach lang,$(LUCI_LANGUAGES)/' feeds/luci/luci.mk || true
 fi
 
-echo "== 5/5 写入配置与默认主题 =="
+echo "== 5/7 写入配置与默认主题 =="
 cat >> .config <<'EOF'
 CONFIG_PACKAGE_luci=y
 CONFIG_PACKAGE_luci-base=y
@@ -45,14 +45,19 @@ CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
 # iStore 的守卫依赖（缺一个 kconfig 就把 luci-app-store 整条丢掉，.config 里查不到该符号）：
 #   depends on !(PACKAGE_TAR_XZ) || PACKAGE_xz-utils
 # tar 被 select 进来后 TAR_XZ 默认 =y，所以必须显式选 xz-utils。
-# 2026-11-21 RG-EW6000GX Pro 首次构建即因此失败（step「校验机型与主题并 defconfig」报 iStore 未生效）。
 CONFIG_PACKAGE_xz-utils=y
 CONFIG_PACKAGE_luci-lib-taskd=y
 CONFIG_PACKAGE_taskd=y
 CONFIG_PACKAGE_luci-lua-runtime=y
+# 首页仪表盘（quickstart 是 Lua 应用，需要 luci-compat + lua 运行时）
+CONFIG_PACKAGE_luci-compat=y
+CONFIG_PACKAGE_luci-app-quickstart=y
+CONFIG_PACKAGE_quickstart=y
+CONFIG_PACKAGE_luci-app-ttyd=y
+CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn=y
 EOF
 
-echo "== 5.5/6 追加机型附加包（packages.txt 单点维护） =="
+echo "== 5.5/7 追加机型附加包（packages.txt 单点维护） =="
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKGLIST="$HERE/devices-pack/ew6000gx/packages.txt"
 if [ -f "$PKGLIST" ]; then
@@ -99,4 +104,76 @@ EOT
 exit 0
 EOF
 chmod +x files/etc/uci-defaults/98-lan-ip
+
+echo "== 6/7 品牌：VERSION_DIST 固定为 Kwrt =="
+# VERSION_DIST 定义在 package/base-files/image-config.in 的 `if VERSIONOPT` 里，
+# 只有 IMAGEOPT/VERSIONOPT 全开时该符号才可见；否则 make defconfig 会把它删掉，
+# /etc/openwrt_release 就退回 DISTRIB_ID="OpenWrt"，LuCI 登录页也跟着显示 OpenWrt。
+# 直接改默认值，任何一次 defconfig 之后仍然是 Kwrt。
+if [ -f package/base-files/image-config.in ]; then
+  sed -i 's/^\(\s*\)default "OpenWrt"$/\1default "Kwrt"/' package/base-files/image-config.in
+  if grep -q 'default "Kwrt"' package/base-files/image-config.in; then
+    echo "[ok] VERSION_DIST 默认值 = Kwrt"
+  else
+    echo "::warning::VERSION_DIST 默认值替换失败（登录页可能仍显示 OpenWrt）"
+  fi
+fi
+
+echo "== 7/7 首页仪表盘 + 默认展开左侧导航 =="
+# 7.1 首页：quickstart（与 lede 各机型同一套，kiddin9/op-packages）
+if [ ! -f package/luci-app-quickstart/Makefile ] || [ ! -f package/quickstart/Makefile ]; then
+  tmp="$(mktemp -d)"
+  git clone -q --depth 1 --filter=blob:none --sparse \
+    https://github.com/kiddin9/op-packages.git "$tmp/repo"
+  git -C "$tmp/repo" sparse-checkout set luci-app-quickstart quickstart
+  for p in luci-app-quickstart quickstart; do
+    rm -rf "package/feeds/istore/$p" "package/feeds/luci/$p" "package/$p"
+    cp -a "$tmp/repo/$p" "package/$p"
+  done
+  rm -rf "$tmp"
+fi
+bash "$(dirname "$0")/quickstart-fix.sh" .
+
+# 7.2 vantage 左侧是图标栏（rail），默认收起、点「Expand navigation」才展开，
+#     状态存在 localStorage 的 vantage.rail。这里把默认值改成展开（pinned）；
+#     用户手动收起时写 'unpinned'，仍然用户偏好优先。
+VUT=package/luci-theme-vantage/ucode/template/themes/vantage/header.ut
+VMJ=package/luci-theme-vantage/htdocs/luci-static/resources/menu-vantage.js
+python3 - "$VUT" "$VMJ" <<'PY'
+import io
+import sys
+
+hut, mjs = sys.argv[1], sys.argv[2]
+
+
+def patch(path, pairs):
+    try:
+        s = io.open(path, encoding="utf-8").read()
+    except IOError:
+        print("::warning::未找到 %s" % path)
+        return
+    hit = 0
+    for a, b in pairs:
+        if a in s:
+            s = s.replace(a, b)
+            hit += 1
+    io.open(path, "w", encoding="utf-8", newline="\n").write(s)
+    print("[ok] %s 替换 %d 处" % (path, hit))
+
+
+patch(hut, [
+    ("localStorage.getItem('vantage.rail') || ''",
+     "localStorage.getItem('vantage.rail') || 'pinned'"),
+    ("if (rail === 'pinned') r.setAttribute('data-rail', 'pinned');",
+     "if (rail !== 'unpinned') r.setAttribute('data-rail', 'pinned');"),
+])
+patch(mjs, [
+    ("storageSet(RAIL_KEY, pinned ? null : 'pinned');",
+     "storageSet(RAIL_KEY, pinned ? 'unpinned' : 'pinned');"),
+])
+PY
+
+# board.d 覆盖脚本需要可执行位（apply-pack 用 copyfile 复制，不带权限）
+chmod 755 files/etc/board.d/* 2>/dev/null || true
+
 echo "[done] customize"
