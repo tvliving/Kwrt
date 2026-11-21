@@ -144,20 +144,22 @@ jobs:
           mkdir -p out
           cp -f openwrt/bin/targets/mediatek/filogic/*ew-6000gx* out/ 2>/dev/null || true
           cp -f openwrt/bin/targets/mediatek/filogic/*.json out/ 2>/dev/null || true
-          # 同一镜像会同时出现 <仓库名>-... 与 openwrt-...（上游默认名）两份文件名，
-          # 只留仓库名那份，同一个包不要在 Release 里躺两份
-          for f in out/openwrt-mediatek-filogic-*; do
+          # 产物名统一以仓库名为前缀。VERSION_DIST 会被后续的 make defconfig 吃掉，
+          # 不能只靠它，这里做兜底改名（已经是 kwrt-* 的跳过）。
+          for f in out/*mediatek-filogic-*ew-6000gx*; do
             [ -e "$f" ] || continue
-            base=$(basename "$f" | sed 's/^openwrt-//')
-            sib=$(ls out | grep -v '^openwrt-' | grep -F -- "-$base" | head -1)
-            if [ -n "$sib" ]; then rm -f "$f"; echo "去掉重复文件: $base（保留 $sib）"; fi
+            b=$(basename "$f")
+            case "$b" in
+              kwrt-*) : ;;
+              openwrt-*) mv -f "$f" "out/kwrt-${b#openwrt-}"; echo "改名: $b -> kwrt-${b#openwrt-}" ;;
+              *) mv -f "$f" "out/kwrt-$b"; echo "改名: $b -> kwrt-$b" ;;
+            esac
           done
-          # 多分区 U-Boot 只需一个 sysupgrade 刷机包，多出来说明 IMAGES/KERNEL_INITRAMFS 没生效
+          # 多分区 U-Boot 只需要一个 sysupgrade 刷机包
           n=$(ls out | grep -c 'ew-6000gx') || true
           [ "$n" = "1" ] || { echo "::error::应当只有 1 个刷机包，实际 $n 个"; ls -l out; exit 1; }
-          # 名字必须以仓库名开头，否则说明 VERSION_DIST 没生效
-          ls out | grep -q '^kwrt-mediatek-filogic-.*ew-6000gx' \
-            || { echo "::error::产物名不是 kwrt-* 前缀，检查 VERSION_DIST"; exit 1; }
+          ls out | grep -q '^kwrt-.*ew-6000gx' \
+            || { echo "::error::产物名不是 kwrt-* 前缀"; ls -l out; exit 1; }
           (cd out && sha256sum ./* > sha256sums.txt) 2>/dev/null || true
           ls -lh out
 
