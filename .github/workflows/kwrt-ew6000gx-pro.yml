@@ -133,10 +133,13 @@ jobs:
           total=$(grep -c '^CONFIG_PACKAGE_.*=y$' .config || true)
           echo "选中包总数: $total ；被丢弃: $miss"
           for k in luci uhttpd luci-mod-admin-full luci-theme-vantage luci-app-store \
-                   kmod-mt7915e kmod-mt7986-firmware iwinfo wpad-basic-mbedtls \
+                   kmod-mt7915e kmod-mt7986-firmware iwinfo \
                    luci-compat luci-lua-runtime luci-app-quickstart quickstart; do
             grep -q "^CONFIG_PACKAGE_${k}=y$" .config || { echo "::error::关键包缺失: $k"; exit 1; }
           done
+          # wpad 变体随仓库默认不同，只要有一个 hostapd 套件就行
+          grep -qE '^CONFIG_PACKAGE_(wpad-basic-mbedtls|wpad-openssl|wpad-mbedtls|wpad)=y$' .config \
+            || { echo "::error::关键包缺失: wpad（无线接入点守护进程）"; exit 1; }
 
       - name: 关闭 BTF（规避 tools/dwarves 构建失败）
         run: |
