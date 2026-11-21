@@ -88,7 +88,15 @@ jobs:
       - name: 校验机型与主题并 defconfig
         run: |
           cd openwrt
+          # VERSION_DIST 定义在 package/base-files/image-config.in 的 if VERSIONOPT 内，
+          # IMAGEOPT/VERSIONOPT 不全开时 make defconfig 会把 CONFIG_VERSION_DIST 丢掉，
+          # 产物名就会退回上游默认的 openwrt-*，这里固定成仓库名。
+          printf 'CONFIG_IMAGEOPT=y\nCONFIG_VERSIONOPT=y\n' >> .config
           make defconfig
+          sed -i '/^CONFIG_VERSION_DIST=/d' .config
+          echo 'CONFIG_VERSION_DIST="Kwrt"' >> .config
+          grep -q '^CONFIG_VERSION_DIST="Kwrt"$' .config \
+            || { echo "::error::VERSION_DIST 未生效（期望 kwrt-* 产物名）"; exit 1; }
           echo "---- 机型 ----"
           grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config || {
             echo "::error::机型未生效，检查 filogic.mk 是否含对应 Device 定义"; exit 1; }
@@ -134,6 +142,17 @@ jobs:
           mkdir -p out
           cp -f openwrt/bin/targets/mediatek/filogic/*ew-6000gx* out/ 2>/dev/null || true
           cp -f openwrt/bin/targets/mediatek/filogic/*.json out/ 2>/dev/null || true
+          # 同一镜像会同时出现 <仓库名>-... 与 openwrt-...（上游默认名）两份文件名，
+          # 只留仓库名那份，同一个包不要在 Release 里躺两份
+          for f in out/openwrt-mediatek-filogic-*; do
+            [ -e "$f" ] || continue
+            base=$(basename "$f" | sed 's/^openwrt-//')
+            sib=$(ls out | grep -v '^openwrt-' | grep -F -- "-$base" | head -1)
+            if [ -n "$sib" ]; then rm -f "$f"; echo "去掉重复文件: $base（保留 $sib）"; fi
+          done
+          # 名字必须以仓库名开头，否则说明 VERSION_DIST 没生效
+          ls out | grep -q '^kwrt-mediatek-filogic-.*ew-6000gx' \
+            || { echo "::error::产物名不是 kwrt-* 前缀，检查 VERSION_DIST"; exit 1; }
           (cd out && sha256sum ./* > sha256sums.txt) 2>/dev/null || true
           ls -lh out
 
@@ -144,16 +163,23 @@ jobs:
           path: out/
           retention-days: 14
 
+      - name: 计算发布标签（每机型每周一个 Release）
+        if: success()
+        id: rel
+        run: echo "tag=kwrt-${{ env.SLUG }}-$(TZ=Asia/Shanghai date +%G-W%V)" >> "$GITHUB_OUTPUT"
+
       - name: 发布 Release
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: kwrt-${{ env.SLUG }}-${{ github.run_number }}
-          name: Kwrt EW-6000GX Pro build ${{ github.run_number }}
+          tag_name: ${{ steps.rel.outputs.tag }}
+          name: Kwrt EW-6000GX Pro · ${{ steps.rel.outputs.tag }}
           body: |
             自动构建：tvliving/Kwrt / ruijie_ew-6000gx-pro（MT7986A）
+            - 每机型每周一个 Release，同周重跑覆盖同一个 tag，不会堆积多个版本
+            - 文件名前缀固定为仓库名（kwrt-*），不再产出 openwrt-* 副本
             - 定时：每周六 09:00（北京时间）
-            - 主题：luci-theme-vantage（已移除 argon）
+            - 主题：luci-theme-vantage（已移除 argon），首启默认中文界面
             - 内置：iStore 软件中心 + 简体中文语言包
             - 布局：107M UBI + sysupgrade-tar（沿用原厂 U-Boot）
             - 运行记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
