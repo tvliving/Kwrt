@@ -1,0 +1,420 @@
+# Kwrt CMCC RAX3000M（eMMC 版，官方原生支持）固件构建
+#
+# 走上游 openwrt-25.12 官方的 cmcc_rax3000m 设备定义，一个设备同时覆盖
+# eMMC / NAND 两种硬件（DEVICE_DTS_OVERLAY = emmc + nand 两套 dtso）：
+#   · IMAGES = sysupgrade.itb —— FIT(kernel + 外部 rootfs)，GPT 分区
+#   · eMMC 引导链由 ARTIFACT 产出：emmc-gpt.bin + emmc-{ddr3,ddr4}-preloader/fip
+#   · 不做任何 ubi 扩容 / platform.sh 路由改写（那是 NAND 硬改 256M 机型专用的另一套）
+#
+# 首页 / iStore / 中文：与 kwrt-hy3000.yml 同一套（devices/common/istore-zh.sh + 依赖链显式选入）
+# WiFi：mt76（kmod-mt7915e）+ factory eeprom nvmem 校准数据
+name: 🛠️ Kwrt CMCC RAX3000M (eMMC, 官方原生) Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      make_release:
+        description: 编译完成后发布 Release
+        type: boolean
+        default: true
+  push:
+    branches: [25.12]
+    paths:
+      - '.github/workflows/kwrt-rax3000m-emmc.yml'
+      - 'devices/mediatek_filogic_rax3000m_emmc/**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kwrt-rax3000m-emmc
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Shanghai
+  TARGET: mediatek_filogic_rax3000m_emmc
+  TAG_PREFIX: kwrt-rax3000m-emmc
+  MIN_DEVICES: '1'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout 构建配方
+        uses: actions/checkout@v4
+
+      - name: 获取日期
+        run: echo "DATE=$(date +%Y%m%d)" >> "$GITHUB_ENV"
+
+      - name: 释放磁盘空间
+        uses: coder-xiaomo/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: 安装编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget dwarves \
+            llvm python3-pyelftools libpython3-dev aria2 jq qemu-utils ccache rename \
+            libelf-dev device-tree-compiler libgmp3-dev libmpc-dev libfuse-dev
+          sudo timedatectl set-timezone "Asia/Shanghai"
+          # libnftnl 1.3.1 的 autoreconf 会调 automake-1.17，而 Ubuntu 只带 1.16.5，
+          # 于是 build-aux/missing 直接 `automake-1.17: command not found`（Error 127）。
+          # 这里现编一个 1.17 装到 /usr/local，版本化命令名 automake-1.17 会被 missing 优先命中。
+          if ! command -v automake-1.17 >/dev/null 2>&1; then
+            ( cd /tmp \
+              && curl -fsSL -o automake.tar.xz https://mirrors.kernel.org/gnu/automake/automake-1.17.tar.xz \
+              && tar xf automake.tar.xz \
+              && cd automake-1.17 \
+              && ./configure --prefix=/usr/local -q \
+              && make -j"$(nproc)" -s \
+              && sudo make install -s )
+          fi
+          automake-1.17 --version | head -1
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+      - name: 克隆 OpenWrt 源码（openwrt-25.12）
+        run: |
+          set -x
+          git clone --depth 1 -b openwrt-25.12 https://github.com/openwrt/openwrt openwrt
+
+      - name: 构建目录挂到大盘
+        run: |
+          sudo mkdir -p -m 777 /mnt/openwrt/build_dir openwrt/staging_dir
+          ln -sf /mnt/openwrt/build_dir openwrt/build_dir
+          sudo ln -sf "$PWD/openwrt/staging_dir" /mnt/openwrt/staging_dir
+
+      - name: 载入 Kwrt 定制（common diy.sh）
+        run: |
+          function git_clone_path() {
+            trap 'rm -rf "$tmpdir"' EXIT
+            branch="$1" rurl="$2" mv="$3"
+            [[ "$mv" != "mv" ]] && shift 2 || shift 3
+            rootdir="$PWD"
+            tmpdir="$(mktemp -d)" || exit 1
+            if [ ${#branch} -lt 10 ]; then
+              git clone -b "$branch" --depth 1 --filter=blob:none --sparse "$rurl" "$tmpdir"
+              cd "$tmpdir"
+            else
+              git clone --filter=blob:none --sparse "$rurl" "$tmpdir"
+              cd "$tmpdir"
+              git checkout $branch
+            fi
+            git sparse-checkout init --cone
+            git sparse-checkout set $@
+            [[ "$mv" != "mv" ]] && cp -rn ./* $rootdir/ || mv -n $@/* $rootdir/$@/
+            cd $rootdir
+          }
+          export -f git_clone_path
+          export REPO_TOKEN="${{ secrets.KWRT_TOKEN }}"
+          mkdir -p openwrt
+          cp -rf devices/common/. openwrt/
+          cp -rf "devices/$TARGET/." openwrt/
+          cp -rf devices openwrt/
+          cd openwrt
+          chmod +x devices/common/diy.sh
+          /bin/bash devices/common/diy.sh
+
+      - name: 写入机型配置（上游原生 cmcc_rax3000m，不做 NAND 硬改）
+        run: |
+          cd openwrt
+          cp -f devices/common/.config .config
+          echo >> .config
+          cat "devices/$TARGET/.config" >> .config
+          if [ -f "devices/$TARGET/diy.sh" ]; then
+            chmod +x "devices/$TARGET/diy.sh"
+            /bin/bash "devices/$TARGET/diy.sh"
+          fi
+          cp -Rf ./diy/* ./ 2>/dev/null || true
+
+      - name: 启用中文语言包 + 树内 vendor iStore（≥128M 闪存）
+        run: |
+          cd openwrt
+          # eMMC 远大于 128M，整套装：
+          #   · 打开 luci-i18n-*-zh-cn 生成（否则界面只有英文、iStore 首页被静默剔除）
+          #   · 树内 vendor iStore（feed 里的 luci-app-store 会被 kconfig 静默丢弃）
+          bash devices/common/istore-zh.sh
+          # iStore 界面中文化：store.lua 的 vue_lang() 回退按 LuCI 语言映射（zh* -> zh-cn）
+          fx=$(find "$GITHUB_WORKSPACE" -maxdepth 3 -name fix-istore-lang.sh 2>/dev/null | head -1)
+          if [ -n "$fx" ]; then bash "$fx" .; else echo "::warning::未找到 fix-istore-lang.sh，iStore 语言未处理"; fi
+
+      - name: defconfig 并校验机型
+        run: |
+          cd openwrt
+          # 树内新增的包（iStore）必须让 package 元数据重新扫描：
+          # 不删 tmp/.packageinfo 会漏掉刚 vendor 进去的包，
+          # 表现为 tmp/.config-package.in 里没有 PACKAGE_luci-app-store，.config 写 =y 也被静默丢弃
+          rm -f tmp/.packageinfo tmp/.config-package.in
+          make defconfig
+          sed -i "s/\(kmod-qca.*\)=m/\1=n/" .config
+          # 全量简体中文语言包：直接枚举这次构建里存在的 luci-i18n-*-zh-cn
+          awk '/^config PACKAGE_luci-i18n-.+-zh-cn$/{print $2"=y"}' tmp/.config-package.in >> .config
+          {
+            # WiFi：mt76 + 固件（DEVICE_PACKAGES 已有，这里双保险）
+            echo "CONFIG_PACKAGE_kmod-mt7915e=y"
+            echo "CONFIG_PACKAGE_kmod-mt7981-firmware=y"
+            echo "CONFIG_PACKAGE_mt7981-wo-firmware=y"
+            echo "CONFIG_PACKAGE_wpad-openssl=y"
+            echo "CONFIG_PACKAGE_wireless-regdb=y"
+            # iStore 软件中心（首页改用标准 LuCI 概览）
+            echo "CONFIG_PACKAGE_luci-app-store=y"
+            # kconfig 的 DEPENDS 是“要求”而非“自动选择”，依赖不满足时上面那行会被压成 n，
+            # 整条依赖链必须显式选入
+            echo "CONFIG_PACKAGE_luci-lib-taskd=y"
+            echo "CONFIG_PACKAGE_taskd=y"
+            echo "CONFIG_PACKAGE_luci-lua-runtime=y"
+            echo "CONFIG_PACKAGE_libuci-lua=y"
+            echo "CONFIG_PACKAGE_mount-utils=y"
+            echo "CONFIG_PACKAGE_luci-app-ttyd=y"
+            echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y"
+            # store 有 depends on !(PACKAGE_TAR_XZ) || PACKAGE_xz-utils
+            echo "CONFIG_PACKAGE_xz-utils=y"
+          } >> .config
+          make defconfig
+
+          grep -qE '^CONFIG_PACKAGE_kmod-mt7915e=y$' .config \
+            || { echo "::error::kmod-mt7915e 未启用，开机将没有 WiFi"; exit 1; }
+
+          for s in luci-app-store luci-i18n-base-zh-cn; do
+            grep -qE "^CONFIG_PACKAGE_${s}=y$" .config \
+              || { echo "::error::${s} 未生效（iStore 或中文包会缺失）"; exit 1; }
+          done
+          # 反向断言：quickstart 首页已全平台撤掉。它的 home 是独立单页壳子，
+          # 靠 /admin/quickstart/* 的 XHR 拉数据，精简固件里后端起不来就白屏，
+          # 连 vantage 的侧边栏（由页面自身渲染）一起消失。
+          if grep -qE '^CONFIG_PACKAGE_(luci-app-)?quickstart=y$' .config; then
+            echo "::error::quickstart 又被选入（会导致首页白屏 / 无侧边栏）"; exit 1
+          fi
+          n=$(grep -cE '^CONFIG_PACKAGE_luci-i18n-.+-zh-cn=y$' .config || true)
+          [ "$n" -ge 5 ] || { echo "::error::简体中文语言包数量异常：$n"; exit 1; }
+          echo "✔ iStore 已选入，简体中文语言包 $n 个"
+
+          echo "===== 启用的机型 ====="
+          grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config
+          n=$(grep -cE '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config || true)
+          [ "$n" -eq "$MIN_DEVICES" ] || { echo "::error::机型数量应为 $MIN_DEVICES，实际 $n"; exit 1; }
+          grep -q '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m=y$' .config \
+            || { echo "::error::cmcc_rax3000m 未生效"; exit 1; }
+          grep -qE '^CONFIG_TARGET_ROOTFS_PARTSIZE=256$' .config \
+            || echo "::warning::rootfs 分区不是 256MB（eMMC 空间充足，建议放宽）"
+          grep -q '^CONFIG_TARGET_mediatek_filogic=y' .config || { echo "::error::target 未生效"; exit 1; }
+
+      - name: 内核配置自动补默认值（根治 syncconfig 交互中断）
+        run: |
+          cd openwrt
+          # ── 病灶 ──────────────────────────────────────────────────────────────
+          # 这套全家桶把内核 RC_CORE 打开了，linux-6.12 的 drivers/media/rc/Kconfig
+          # 里因此冒出一堆带 prompt 的新符号（IR_IMON_DECODER、IR_MCE_KBD_DECODER、
+          # IR_RCMM_DECODER …）。它们不在内核 .config 里，编译阶段
+          # `SYNC include/config/auto.conf` 就会重启 kconfig 交互；runner 的 stdin 是
+          # EOF → `make[7]: *** [scripts/kconfig/Makefile:85: syncconfig] Error 1`，
+          # target/linux 整个失败。
+          #
+          # ── 为什么补 config 片段没用 ───────────────────────────────────────────
+          # Kernel/Configure 生成内核 .config 的最后一步是
+          #   package-metadata.pl kconfig ... > .config.override
+          #   kconfig.pl 'm+' '+' .config.target /dev/null .config.override > .config.set
+          # override 来自已选包的 KCONFIG，优先级最高，会把 target 片段里的值盖掉。
+          # kconfig 每次只报一个 NEW 符号，逐个补是无穷回合。
+          #
+          # ── 解法 ─────────────────────────────────────────────────────────────
+          # 在 Kernel/Configure/Default 末尾插一条 olddefconfig：它把所有未定义符号
+          # 一次性按默认值填好，完全不交互、只要几秒。
+          # 不选 `make kernel_oldconfig`：它依赖 prepare_kernel_conf → toolchain/install，
+          # 会先编一遍完整工具链（2 核 runner 上一小时起），纯属白烧。
+          python3 - <<'PYEOF'
+          import io, re
+          p = 'include/kernel-defaults.mk'
+          s = io.open(p, encoding='utf-8').read()
+          if '$(KERNEL_MAKE) olddefconfig' in s:
+              print('olddefconfig 补丁已存在，跳过')
+          else:
+              m = re.search(r'define Kernel/Configure/Default\n(.*?)\nendef', s, re.S)
+              assert m, '找不到 Kernel/Configure/Default，上游结构已变，需人工核对'
+              s = s[:m.start(1)] + m.group(1) + '\n\t$(KERNEL_MAKE) olddefconfig' + s[m.end(1):]
+              io.open(p, 'w', encoding='utf-8').write(s)
+              print('✔ 已在 Kernel/Configure/Default 末尾插入 olddefconfig')
+          assert '$(KERNEL_MAKE) olddefconfig' in io.open(p, encoding='utf-8').read()
+          PYEOF
+          sed -n '/define Kernel\/Configure\/Default/,/^endef/p' include/kernel-defaults.mk | tail -4
+
+      - name: 关掉内核 RC/CEC 菜单（减少无谓的驱动探测）
+        run: |
+          cd openwrt
+          # 上面 olddefconfig 已经能兜住所有新符号；这里再把红外/遥控这整块关掉，
+          # 既省编译时间，也避免它们被 default y 拉进来。
+          python3 - <<'PYEOF'
+          import glob, io, os, re
+          SYMS = {
+              'CONFIG_RC_DECODERS': 'n',
+              'CONFIG_RC_DEVICES': 'n',
+              'CONFIG_LIRC': 'n',
+              'CONFIG_MEDIA_CEC_SUPPORT': 'n',
+          }
+          files = [f for f in sorted(glob.glob('target/linux/mediatek/filogic/config-*'))
+                   if os.path.isfile(f)]
+          assert files, '找不到内核 config 片段'
+          for f in files:
+              s = io.open(f, encoding='utf-8').read()
+              added = []
+              for k, v in SYMS.items():
+                  if re.search(r'^(%s=|# %s is not set)$' % (k, k), s, re.M):
+                      continue
+                  s = s.rstrip('\n') + '\n# %s is not set\n' % k
+                  added.append(k)
+              if added:
+                  io.open(f, 'w', encoding='utf-8').write(s)
+              print('%s: %s' % (f, ('补入 ' + ','.join(added)) if added else '已有取值，跳过'))
+          PYEOF
+
+      - name: 编译固件
+        run: |
+          set -o pipefail
+          cd openwrt
+          df -hT
+          if ! make -j"$(( $(nproc) + 1 ))" </dev/null 2>&1 | tee build.log; then
+            echo "::warning::并行编译失败，取错误日志"
+            grep -nE 'Error [0-9]+|error:|No rule to make target|failed to build' build.log | tail -40 || true
+            # 保留 " [host]" 后缀：gettext-full 这类包失败时是
+            #   ERROR: package/libs/gettext-full [host] failed to build.
+            # 旧写法按第一个词取，整条匹配不上会误判成"没识别出失败包"
+            mapfile -t pkgs < <(grep -oE '(package|feeds|tools|toolchain|target)/[A-Za-z0-9_./-]+( \[[a-zA-Z0-9_]+\])? failed to build' build.log \
+                                  | sed 's/ failed to build$//' | sort -u)
+            for pkg in "${pkgs[@]}"; do
+              case "$pkg" in
+                *" [host]") tgt="${pkg% \[host\]}/host/compile" ;;
+                *" ["*)     tgt="$pkg/compile" ;;
+                *)          tgt="$pkg/compile" ;;
+              esac
+              echo "" >> build.log
+              echo "===== 详细错误（make -j1 V=s $tgt）=====" >> build.log
+              timeout 2400 make -j1 V=s "$tgt" 2>&1 | tail -200 | tee -a build.log || true
+            done
+            exit 1
+          fi
+          df -hT
+
+      - name: 上传编译日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            openwrt/build.log
+            openwrt/logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: 收集产物
+        id: collect
+        run: |
+          mkdir -p out
+          B=openwrt/bin/targets/mediatek/filogic
+          ls -lh "$B" | head -40
+          # 固件本体（FIT：kernel + 外部 rootfs）
+          cp -f "$B"/*cmcc_rax3000m-squashfs-sysupgrade.itb out/ 2>/dev/null || true
+          cp -f "$B"/*cmcc_rax3000m-initramfs-recovery.itb out/ 2>/dev/null || true
+          # eMMC 引导链 / 分区表（官方 ARTIFACT）
+          cp -f "$B"/*cmcc_rax3000m-emmc-*.bin out/ 2>/dev/null || true
+          cp -f "$B"/*cmcc_rax3000m-emmc-*.fip out/ 2>/dev/null || true
+          ls -lh out || true
+          ls out/*cmcc_rax3000m-squashfs-sysupgrade.itb >/dev/null 2>&1 \
+            || { echo "::error::没有产出 squashfs-sysupgrade.itb（正式固件）"; exit 1; }
+          ls out/*cmcc_rax3000m-initramfs-recovery.itb >/dev/null 2>&1 \
+            || { echo "::error::没有产出 initramfs-recovery.itb（U-Boot Web 救援）"; exit 1; }
+          ls out/*cmcc_rax3000m-emmc-gpt.bin >/dev/null 2>&1 \
+            || { echo "::error::没有产出 emmc-gpt.bin（eMMC 分区表）"; exit 1; }
+          ls out/*cmcc_rax3000m-emmc-*-preloader.bin >/dev/null 2>&1 \
+            || { echo "::error::没有产出 emmc preloader（eMMC 引导链）"; exit 1; }
+          ls out/*cmcc_rax3000m-emmc-*-bl31-uboot.fip >/dev/null 2>&1 \
+            || { echo "::error::没有产出 emmc bl31-uboot.fip（eMMC 引导链）"; exit 1; }
+          (cd out && sha256sum ./* > sha256sums.txt)
+          DU=$(du -sh out | cut -f1)
+          echo "size=$DU" >> "$GITHUB_OUTPUT"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: kwrt-rax3000m-emmc-images
+          path: out/
+          retention-days: 14
+
+      - name: 发布 Release
+        id: pub
+        # 失败不判死，交给下面 gh CLI 重试（二次限流很常见）
+        continue-on-error: true
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.make_release != false }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_PREFIX }}-${{ env.DATE }}
+          name: Kwrt CMCC RAX3000M (eMMC, 官方原生) ${{ env.DATE }}
+          body: |
+            Kwrt CMCC RAX3000M（eMMC 版，官方原生方案）自动编译
+
+            - 源码: openwrt/openwrt `openwrt-25.12` + Kwrt devices/common 定制
+            - 机型: 上游官方 `cmcc_rax3000m`（`DEVICE_DTS_OVERLAY` 含 emmc / nand 两套 dtso），
+              本包**不做 256M NAND 硬改**，NAND 硬改机请用 `kwrt-rax3000m-256m` 的包
+            - 启动: FIT(kernel + 外部 rootfs) + GPT；rootfs 分区放宽到 256M
+            - WiFi: mt76（kmod-mt7915e）+ factory eeprom nvmem 校准，2.4G/5G 双频
+            - 首页/iStore: 标准 LuCI 概览（不引入 quickstart）+ luci-app-store 软件中心 + 全量简体中文包
+            - 默认 IP: 10.0.0.1 / 用户名 root / 无密码
+            - 工作流: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            ### 刷机流程（eMMC）
+
+            1. U-Boot Web（192.168.1.1）上传 `*-initramfs-recovery.itb` → Update，进临时系统
+            2. LuCI → 系统 → 备份/升级 → 上传 `*-squashfs-sysupgrade.itb`（跨发行版建议不保留配置）
+            3. 也可在临时系统命令行用 `sysupgrade -n *squashfs-sysupgrade.itb`
+            4. eMMC 被清空 / 换过片时，先写 `*-emmc-gpt.bin` + 对应 DDR 的
+               `*-emmc-{ddr3,ddr4}-preloader.bin` 与 `*-emmc-{ddr3,ddr4}-bl31-uboot.fip`，
+               再用 U-Boot Web 刷 `*-initramfs-recovery.itb`
+
+            ### 附件说明
+
+            - `*-squashfs-sysupgrade.itb`: 正式固件（FIT：kernel + 外部 rootfs），系统内升级用
+            - `*-initramfs-recovery.itb`: 过渡/救援系统（U-Boot Web 先刷这个）
+            - `*-emmc-gpt.bin`: eMMC GPT 分区表
+            - `*-emmc-ddr3/ddr4-preloader.bin` + `*-emmc-ddr3/ddr4-bl31-uboot.fip`: eMMC 引导链，
+              按机器的内存颗粒选 DDR3 / DDR4（不确定时 DDR4 先试）
+            - `sha256sums.txt`: 校验和
+          files: out/*
+          fail_on_unmatched_files: false
+
+      - name: 重试上传 Release 资产（GitHub 二次限流兜底）
+        if: ${{ steps.pub.outcome == 'failure' && !cancelled() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          tag="${{ env.TAG_PREFIX }}-${{ env.DATE }}"
+          title="Kwrt CMCC RAX3000M (eMMC, 官方原生) ${{ env.DATE }}"
+          echo ">>> 目标 tag: $tag"
+          for i in 1 2 3 4 5; do
+            echo ">>> 第 $i 次尝试上传"
+            if ! gh release view "$tag" > /dev/null 2>&1; then
+              gh release create "$tag" --title "$title" --notes "见 Actions 运行记录 ${{ github.run_id }}" || true
+            fi
+            if gh release upload "$tag" out/* --clobber; then
+              echo ">>> 上传成功（第 $i 次）"
+              exit 0
+            fi
+            echo ">>> 第 $i 次失败，$((i*30)) 秒后重试"
+            sleep $((i*30))
+          done
+          echo "::error::Release 资产上传仍失败（多为 GitHub 二次限流），产物已保留在 Actions artifact 里"
+          exit 1
