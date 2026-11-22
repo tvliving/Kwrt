@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-给「闪存 >= 128M」的机型自动注入 iStore（软件中心 + 首页）
+给「闪存 >= 128M」的机型自动注入 iStore 软件中心
 
 用法：
     python3 devices/common/inject-istore-128m.py target/linux/mediatek/image/filogic.mk [...]
@@ -11,14 +11,15 @@
   · 没有 IMAGE_SIZE（eMMC / UBI 大容量机型）→ 注入
   · IMAGE_SIZE < 128m（NOR 小闪存）        → 跳过（Kwrt 全量 rootfs + iStore 装不下）
 
-注入内容：在设备 define 块末尾加一行 DEVICE_PACKAGES += luci-app-store luci-app-quickstart
+注入内容：在设备 define 块末尾加一行 DEVICE_PACKAGES += luci-app-store
+（首页保持标准 LuCI 概览，不再带 quickstart）
 （走 DEVICE_PACKAGES 而不是全局 .config，这样只有 ≥128M 的机型会带上商店，
   小闪存机型不会被撑爆 image size）
 """
 import re
 import sys
 
-PAYLOAD = "luci-app-store luci-app-quickstart"
+PAYLOAD = "luci-app-store"
 MIN_KB = 128 * 1024
 
 DEFINE_RE = re.compile(r'^define Device/([A-Za-z0-9_.\-]+)\s*$')

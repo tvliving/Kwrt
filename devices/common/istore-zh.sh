@@ -9,8 +9,7 @@
 #  1) devices/common/patches/luci_mk.patch 为了省体积，把 luci.mk 里的
 #     $(foreach lang,$(LUCI_LANGUAGES),... LuciTranslation ...) 注释掉了
 #     → 所有 luci-i18n-*-zh-cn 包不生成：LuCI「语言」菜单里没有简体中文，
-#       界面只有英文（表现就是「没有中文包」）；同时 luci-app-quickstart
-#       依赖 luci-i18n-ttyd-zh-cn，依赖不满足被 kconfig 静默剔除（iStore 首页丢失）。
+#       界面只有英文（表现就是「没有中文包」）。
 #  2) feed 里的 luci-app-store 带 @(x86_64||aarch64) 架构约束，
 #     在 defconfig 阶段会被 kconfig 静默丢弃，产物里没有 iStore。
 #     改成和 lede 同样「树内 vendor + 去掉架构约束」，并加断言防止再次静默丢失。
@@ -33,15 +32,15 @@ else
   exit 1
 fi
 
-# ── 2. 树内 vendor iStore（软件中心 + 首页）──────────────────────────
+# ── 2. 树内 vendor iStore（只装软件中心，首页用标准 LuCI 概览）──────
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 git clone -q --depth 1 --filter=blob:none --sparse \
   https://github.com/kiddin9/op-packages.git "$tmp/repo"
 git -C "$tmp/repo" sparse-checkout set \
-  luci-app-store luci-app-quickstart quickstart taskd luci-lib-taskd luci-lib-xterm
+  luci-app-store taskd luci-lib-taskd luci-lib-xterm
 
-for p in luci-app-store luci-app-quickstart quickstart taskd luci-lib-taskd luci-lib-xterm; do
+for p in luci-app-store taskd luci-lib-taskd luci-lib-xterm; do
   # 关键：kiddin9 feed 里也有同名包（package/feeds/kiddin9/<p>），
   # 两处同时存在时 kconfig 仍按 feed 那份（带 @(x86_64||aarch64) 约束）定义，
   # 结果还是被静默丢弃 —— 必须先删掉 feed 里的副本，只留树内这份
@@ -51,7 +50,7 @@ for p in luci-app-store luci-app-quickstart quickstart taskd luci-lib-taskd luci
 done
 # 目标均为 aarch64（MT7981/MT7986/MT7988），去掉 x86_64/aarch64 之外一律不许选的约束
 sed -i 's#@(x86_64||aarch64) ##' package/luci-app-store/Makefile
-echo "✔ iStore 软件中心 + 首页已 vendor 到 package/"
+echo "✔ iStore 软件中心已 vendor 到 package/"
 
 # ── 3. 默认简体中文（不依赖浏览器 Accept-Language）──────────────────
 mkdir -p files/etc/uci-defaults

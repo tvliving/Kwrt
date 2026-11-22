@@ -199,14 +199,12 @@ jobs:
             echo "CONFIG_PACKAGE_wpad-openssl=y"
             echo "CONFIG_PACKAGE_wireless-regdb=y"
             echo "CONFIG_PACKAGE_luci-app-store=y"
-            echo "CONFIG_PACKAGE_luci-app-quickstart=y"
             echo "CONFIG_PACKAGE_luci-lib-taskd=y"
             echo "CONFIG_PACKAGE_taskd=y"
             echo "CONFIG_PACKAGE_luci-lua-runtime=y"
             echo "CONFIG_PACKAGE_libuci-lua=y"
             echo "CONFIG_PACKAGE_mount-utils=y"
             echo "CONFIG_PACKAGE_luci-app-ttyd=y"
-            echo "CONFIG_PACKAGE_quickstart=y"
             echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y"
             echo "CONFIG_PACKAGE_xz-utils=y"
           } >> .config
@@ -214,10 +212,16 @@ jobs:
           grep -qE '^CONFIG_PACKAGE_luci-i18n-base-zh-cn=y$' .config \
             || { echo "::error::简体中文语言包未生效"; exit 1; }
 
-          for s in luci-app-store luci-app-quickstart luci-i18n-base-zh-cn; do
+          for s in luci-app-store luci-i18n-base-zh-cn; do
             grep -qE "^CONFIG_PACKAGE_${s}=y$" .config \
               || { echo "::error::${s} 未生效（iStore 或中文包会缺失）"; exit 1; }
           done
+          # 反向断言：quickstart 首页已全平台撤掉。它的 home 是独立单页壳子，
+          # 靠 /admin/quickstart/* 的 XHR 拉数据，精简固件里后端起不来就白屏，
+          # 连 vantage 的侧边栏（由页面自身渲染）一起消失。
+          if grep -qE '^CONFIG_PACKAGE_(luci-app-)?quickstart=y$' .config; then
+            echo "::error::quickstart 又被选入（会导致首页白屏 / 无侧边栏）"; exit 1
+          fi
           n=$(grep -cE '^CONFIG_PACKAGE_luci-i18n-.+-zh-cn=y$' .config || true)
           [ "$n" -ge 5 ] || { echo "::error::简体中文语言包数量异常：$n"; exit 1; }
           echo "✔ iStore 已选入，简体中文语言包 $n 个"

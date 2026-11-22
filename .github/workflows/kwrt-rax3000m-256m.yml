@@ -168,10 +168,9 @@ jobs:
             echo "CONFIG_PACKAGE_mt7981-wo-firmware=y"
             echo "CONFIG_PACKAGE_wpad-openssl=y"
             echo "CONFIG_PACKAGE_wireless-regdb=y"
-            # iStore 软件中心 + 首页（抄 hy3000 方案）
+            # iStore 软件中心（首页改用标准 LuCI 概览）
             echo "CONFIG_PACKAGE_luci-app-store=y"
-            echo "CONFIG_PACKAGE_luci-app-quickstart=y"
-            # kconfig 的 DEPENDS 是“要求”而非“自动选择”，依赖不满足时上面两行会被压成 n，
+            # kconfig 的 DEPENDS 是“要求”而非“自动选择”，依赖不满足时上面那行会被压成 n，
             # 整条依赖链必须显式选入
             echo "CONFIG_PACKAGE_luci-lib-taskd=y"
             echo "CONFIG_PACKAGE_taskd=y"
@@ -179,7 +178,6 @@ jobs:
             echo "CONFIG_PACKAGE_libuci-lua=y"
             echo "CONFIG_PACKAGE_mount-utils=y"
             echo "CONFIG_PACKAGE_luci-app-ttyd=y"
-            echo "CONFIG_PACKAGE_quickstart=y"
             echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y"
             # store 有 depends on !(PACKAGE_TAR_XZ) || PACKAGE_xz-utils
             echo "CONFIG_PACKAGE_xz-utils=y"
@@ -189,10 +187,16 @@ jobs:
           grep -qE '^CONFIG_PACKAGE_kmod-mt7915e=y$' .config \
             || { echo "::error::kmod-mt7915e 未启用，开机将没有 WiFi"; exit 1; }
 
-          for s in luci-app-store luci-app-quickstart luci-i18n-base-zh-cn; do
+          for s in luci-app-store luci-i18n-base-zh-cn; do
             grep -qE "^CONFIG_PACKAGE_${s}=y$" .config \
               || { echo "::error::${s} 未生效（iStore 或中文包会缺失）"; exit 1; }
           done
+          # 反向断言：quickstart 首页已全平台撤掉。它的 home 是独立单页壳子，
+          # 靠 /admin/quickstart/* 的 XHR 拉数据，精简固件里后端起不来就白屏，
+          # 连 vantage 的侧边栏（由页面自身渲染）一起消失。
+          if grep -qE '^CONFIG_PACKAGE_(luci-app-)?quickstart=y$' .config; then
+            echo "::error::quickstart 又被选入（会导致首页白屏 / 无侧边栏）"; exit 1
+          fi
           n=$(grep -cE '^CONFIG_PACKAGE_luci-i18n-.+-zh-cn=y$' .config || true)
           [ "$n" -ge 5 ] || { echo "::error::简体中文语言包数量异常：$n"; exit 1; }
           echo "✔ iStore 已选入，简体中文语言包 $n 个"
@@ -358,7 +362,7 @@ jobs:
             - 启动: 经典 NAND UBI 卷方案（kernel FIT 卷 + rootfs squashfs 静态卷），
               **兼容原厂/社区老 U-Boot**，不刷 preloader/fip，与 lede 同款方案
             - WiFi: mt76（kmod-mt7915e）+ factory eeprom nvmem 校准，2.4G/5G 双频
-            - 首页/iStore: luci-app-quickstart 首页 + luci-app-store 软件中心 + 全量简体中文包
+            - 首页/iStore: 标准 LuCI 概览（不引入 quickstart）+ luci-app-store 软件中心 + 全量简体中文包
             - 默认 IP: 10.0.0.1 / 用户名 root / 无密码
             - 工作流: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
