@@ -108,6 +108,9 @@ jobs:
         run: |
           cd openwrt
           bash ../scripts/customize.sh .
+          # iStore 界面中文化：store.lua 的 vue_lang() 回退按 LuCI 语言映射（zh* -> zh-cn）
+          fx=$(find "$GITHUB_WORKSPACE" -maxdepth 3 -name fix-istore-lang.sh 2>/dev/null | head -1)
+          if [ -n "$fx" ]; then bash "$fx" .; else echo "::warning::未找到 fix-istore-lang.sh，iStore 语言未处理"; fi
 
       - name: 校验机型与主题并 defconfig
         if: steps.pick.outputs.selected != 'false'

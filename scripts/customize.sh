@@ -169,4 +169,7 @@ PY
 # board.d 覆盖脚本需要可执行位（apply-pack 用 copyfile 复制，不带权限）
 chmod 755 files/etc/board.d/* 2>/dev/null || true
 
+# iStore 界面中文化（没有内置 iStore 的机型会自己跳过）
+bash "$(dirname "$0")/fix-istore-lang.sh" . || true
+
 echo "[done] customize"

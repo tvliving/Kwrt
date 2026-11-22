@@ -134,6 +134,9 @@ jobs:
           bash devices/common/istore-zh.sh
           # iStore 只给闪存 >=128M 的机型，避免小闪存 image size 爆掉
           python3 devices/common/inject-istore-128m.py target/linux/mediatek/image/filogic.mk
+          # iStore 界面中文化：store.lua 的 vue_lang() 回退按 LuCI 语言映射（zh* -> zh-cn）
+          fx=$(find "$GITHUB_WORKSPACE" -maxdepth 3 -name fix-istore-lang.sh 2>/dev/null | head -1)
+          if [ -n "$fx" ]; then bash "$fx" .; else echo "::warning::未找到 fix-istore-lang.sh，iStore 语言未处理"; fi
 
       - name: defconfig 并校验机型
         run: |

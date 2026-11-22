@@ -146,6 +146,9 @@ jobs:
           #   · 打开 luci-i18n-*-zh-cn 生成（否则界面只有英文、iStore 首页被静默剔除）
           #   · 树内 vendor iStore（feed 里的 luci-app-store 会被 kconfig 静默丢弃）
           bash devices/common/istore-zh.sh
+          # iStore 界面中文化：store.lua 的 vue_lang() 回退按 LuCI 语言映射（zh* -> zh-cn）
+          fx=$(find "$GITHUB_WORKSPACE" -maxdepth 3 -name fix-istore-lang.sh 2>/dev/null | head -1)
+          if [ -n "$fx" ]; then bash "$fx" .; else echo "::warning::未找到 fix-istore-lang.sh，iStore 语言未处理"; fi
 
       - name: defconfig 并校验机型
         run: |
