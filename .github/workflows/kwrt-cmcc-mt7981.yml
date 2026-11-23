@@ -140,8 +140,14 @@ jobs:
           [ -f "devices/$TARGET/diy.sh" ] \
             || { echo "::error::缺少 devices/$TARGET/diy.sh，四个机型都不会有产物"; exit 1; }
           chmod +x "devices/$TARGET/diy.sh"
+          # diy/ 里的 DTS 必须先落位：devices/$TARGET/diy.sh 末尾会断言 6 个设备树
+          # 都已在 target/linux/mediatek/dts 下（2026-11-23 首跑即因顺序反了报
+          # “DTS 缺失: mt7981b-cmcc-rax3000m-emmc-lede”）。diy/ 只含新增 dts，
+          # 不会覆盖 diy.sh 之后要改的 filogic.mk / platform.sh / 02_network。
+          for src in "./diy" "devices/$TARGET/diy"; do
+            [ -d "$src" ] && cp -Rf "$src/." ./ 2>/dev/null || true
+          done
           /bin/bash "devices/$TARGET/diy.sh"
-          cp -Rf ./diy/* ./ 2>/dev/null || true
           # DTS 落位核查：6 个设备树文件必须都在
           for d in mt7981b-cmcc-rax3000m-lede mt7981b-cmcc-rax3000m-nand-lede \
                    mt7981b-cmcc-rax3000m-emmc-lede \
