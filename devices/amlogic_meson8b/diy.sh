@@ -24,4 +24,6 @@ target/linux/amlogic/Makefile
 
 rm -rf package/feeds/kiddin9/{*_QMI_WWAN,quectel_MHI} target/linux/amlogic/patches-6.12/904-net-stmmac-disable-hw-vlan-filter-on-meson8b.patch
 
+sed -i 's/DEFAULT_PACKAGES +=/DEFAULT_PACKAGES += luci-app-diskman automount/' target/linux/amlogic/Makefile
+
 
