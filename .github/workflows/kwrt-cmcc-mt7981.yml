@@ -16,7 +16,7 @@
 #   istore-zh.sh 会 vendor iStore 并写入 files/etc/uci-defaults/zzz-zh-cn（luci.main.lang=zh-cn）
 # 定时：每周六 14:00（北京时间），比 kwrt-ew6000gx-pro 的 09:00 晚 5 小时。
 # DTS 已适配 openwrt-25.12：include 用内核提供的 mt7981b.dtsi，memory 节点补 device_type。
-name: 🛠️ Kwrt MT798x Other Devices (lede 移植) Build
+name: 🛠️ Kwrt CMCC RAX3000M / XR30 (NAND+eMMC, lede 移植) Build
 
 on:
   schedule:
