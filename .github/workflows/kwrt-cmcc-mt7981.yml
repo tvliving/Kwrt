@@ -14,14 +14,14 @@
 # 编译内容与其它 MT798x 机型 workflow 同一套（common diy.sh + patches + 树内 vendor iStore
 # + 全量简体中文语言包 + 并行失败单线程重跑）。iStore 与界面语言强制简体中文：
 #   istore-zh.sh 会 vendor iStore 并写入 files/etc/uci-defaults/zzz-zh-cn（luci.main.lang=zh-cn）
-# 定时：每周六 14:00（北京时间），比 kwrt-ew6000gx-pro 的 09:00 晚 5 小时。
+# 定时：每周六 19:00（北京时间），比原 14:00 再晚 5 小时（= ew6000gx-pro 09:00 晚 10 小时）。
 # DTS 已适配 openwrt-25.12：include 用内核提供的 mt7981b.dtsi，memory 节点补 device_type。
 name: 🛠️ Kwrt CMCC RAX3000M / XR30 (NAND+eMMC, lede 移植) Build
 
 on:
   schedule:
-    # 每周六 14:00（北京时间 UTC+8 → UTC 06:00）= ew6000gx 的 09:00 往后 5 小时
-    - cron: '0 6 * * 6'
+    # 每周六 19:00（北京时间 UTC+8 → UTC 11:00）= 原 14:00 往后 5 小时（ew6000gx 09:00 晚 10 小时）
+    - cron: '0 11 * * 6'
   workflow_dispatch:
     inputs:
       make_release:
@@ -425,7 +425,7 @@ jobs:
             - 引导: **沿用机器现有 U-Boot，不刷 preloader / fip / gpt**
             - 界面: iStore 软件市场 + 强制简体中文（默认语言 zh-cn）+ 全量简体中文语言包
             - 默认 IP: 10.0.0.1 / 用户名 root / 无密码
-            - 定时: 每周六 14:00（北京时间）自动编译
+            - 定时: 每周六 19:00（北京时间）自动编译
             - 工作流: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
             ### 刷机提示
