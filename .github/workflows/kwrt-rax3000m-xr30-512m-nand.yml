@@ -1,0 +1,531 @@
+# Kwrt CMCC RAX3000M / XR30（NAND 硬改 512M Flash）固件构建
+#
+# 从 tvliving/lede 的 lede-rax3000m-512m.yml 移植分区方案 + 机型方案到 Kwrt：
+#   · ubi 分区由原厂 114MB（0x7200000）扩到 490MiB（0x580000 + 0x1EA00000），
+#     IMAGE_SIZE 116736k → 496128k；沿用 KERNEL_IN_UBI + sysupgrade-tar，
+#     出 factory.bin（append-ubi 全量）+ sysupgrade.bin（系统内升级）。
+#   · 机型 DTS 用 Kwrt 已有 CMCC 配方（devices/mediatek_filogic_cmcc_mt7981）里
+#     已适配 openwrt-25.12 的版本（include 内核 mt7981b.dtsi + memory device_type），
+#     不产 preloader / fip / gpt / initramfs，沿用机器现有 U-Boot。
+#
+# ⚠️ 需硬改 512M Flash + 512M 大分区 U-Boot（FIP 内含 512m 布局），128M/256M U-Boot 会启动失败。
+#
+# 首页 / 主题 / 市场：遵循 Kwrt 仓库现行统一方案
+#   · 首页：标准 LuCI 概览（vantage 主题下的 状态-概览），不引入 quickstart
+#     （quickstart 是独立单页壳子，会盖掉 vantage 侧边栏且精简固件里易白屏）
+#   · 默认主题：vantage（树内 vendor + 99 号 uci-defaults 强制 mediaurlbase）
+#   · iStore 市场强制简体中文：istore-zh.sh + 全量 luci-i18n-*-zh-cn
+# 定时：每周六 21:00（北京时间），与 kwrt-cmcc-mt7981（周六 19:00）错开。
+name: 🛠️ Kwrt CMCC RAX3000M / XR30 (NAND 512M, lede 移植) Build
+
+on:
+  schedule:
+    # 每周六 21:00（北京时间 UTC+8 → UTC 13:00），比 256M 版再晚 1 小时
+    - cron: '0 13 * * 6'
+  workflow_dispatch:
+    inputs:
+      make_release:
+        description: 编译完成后发布 Release
+        type: boolean
+        default: true
+  push:
+    branches: [25.12]
+    paths:
+      - '.github/workflows/kwrt-rax3000m-xr30-512m-nand.yml'
+      - 'devices/mediatek_filogic_cmcc_mt7981/**'
+permissions:
+  contents: write
+
+concurrency:
+  group: kwrt-rax3000m-xr30-512m-nand
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Shanghai
+  TARGET: mediatek_filogic_cmcc_mt7981
+  TAG_PREFIX: kwrt-rax3000m-xr30-512m-nand
+  MIN_DEVICES: '2'
+  DEVICES: >-
+    cmcc_rax3000m-nand cmcc_xr30-nand
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout 构建配方
+        uses: actions/checkout@v4
+
+      - name: 获取日期
+        run: echo "DATE=$(date +%Y%m%d)" >> "$GITHUB_ENV"
+
+      - name: 释放磁盘空间
+        uses: coder-xiaomo/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: 安装编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget dwarves \
+            llvm python3-pyelftools libpython3-dev aria2 jq qemu-utils ccache rename \
+            libelf-dev device-tree-compiler libgmp3-dev libmpc-dev libfuse-dev
+          sudo timedatectl set-timezone "Asia/Shanghai"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+      - name: 克隆 OpenWrt 源码（openwrt-25.12）
+        run: |
+          set -x
+          git clone --depth 1 -b openwrt-25.12 https://github.com/openwrt/openwrt openwrt
+
+      - name: 构建目录挂到大盘
+        run: |
+          sudo mkdir -p -m 777 /mnt/openwrt/build_dir openwrt/staging_dir
+          ln -sf /mnt/openwrt/build_dir openwrt/build_dir
+          sudo ln -sf "$PWD/openwrt/staging_dir" /mnt/openwrt/staging_dir
+
+      - name: 载入 Kwrt 定制（common diy.sh）
+        run: |
+          function git_clone_path() {
+            trap 'rm -rf "$tmpdir"' EXIT
+            branch="$1" rurl="$2" mv="$3"
+            [[ "$mv" != "mv" ]] && shift 2 || shift 3
+            rootdir="$PWD"
+            tmpdir="$(mktemp -d)" || exit 1
+            if [ ${#branch} -lt 10 ]; then
+              git clone -b "$branch" --depth 1 --filter=blob:none --sparse "$rurl" "$tmpdir"
+              cd "$tmpdir"
+            else
+              git clone --filter=blob:none --sparse "$rurl" "$tmpdir"
+              cd "$tmpdir"
+              git checkout $branch
+            fi
+            git sparse-checkout init --cone
+            git sparse-checkout set $@
+            [[ "$mv" != "mv" ]] && cp -rn ./* $rootdir/ || mv -n $@/* $rootdir/$@/
+            cd $rootdir
+          }
+          export -f git_clone_path
+          export REPO_TOKEN="${{ secrets.KWRT_TOKEN }}"
+          mkdir -p openwrt
+          cp -rf devices/common/. openwrt/
+          cp -rf "devices/$TARGET/." openwrt/
+          cp -rf devices openwrt/
+          cd openwrt
+          chmod +x devices/common/diy.sh
+          /bin/bash devices/common/diy.sh
+
+      - name: 注入 CMCC NAND 机型并扩分区到 512M（diy.sh + diy 覆盖）
+        run: |
+          cd openwrt
+          cp -f devices/common/.config .config
+          echo >> .config
+          cat "devices/$TARGET/.config" >> .config
+          [ -f "devices/$TARGET/diy.sh" ] \
+            || { echo "::error::缺少 devices/$TARGET/diy.sh，四个机型都不会有产物"; exit 1; }
+          chmod +x "devices/$TARGET/diy.sh"
+          # diy/ 里的 DTS 必须先落位：devices/$TARGET/diy.sh 末尾会断言 6 个设备树
+          # 都已在 target/linux/mediatek/dts 下（2026-11-23 首跑即因顺序反了报
+          # “DTS 缺失: mt7981b-cmcc-rax3000m-emmc-lede”）。diy/ 只含新增 dts，
+          # 不会覆盖 diy.sh 之后要改的 filogic.mk / platform.sh / 02_network。
+          for src in "./diy" "devices/$TARGET/diy"; do
+            [ -d "$src" ] && cp -Rf "$src/." ./ 2>/dev/null || true
+          done
+          /bin/bash "devices/$TARGET/diy.sh"
+
+          # ---- 扩分区到 512M：DTS 的 ubi 分区 + filogic.mk 的 IMAGE_SIZE ----
+          python3 - <<'PYEOF'
+          import io, re
+          OLD = 'reg = <0x580000 0x7200000>;'   # 原厂 128M：ubi 114MB
+          NEW = 'reg = <0x580000 0x1EA00000>;'  # 490MiB
+          IMG_OLD = 'IMAGE_SIZE := 116736k'
+          IMG_NEW = 'IMAGE_SIZE := 496128k'
+
+          def load(p):
+              return io.open(p, encoding='utf-8', newline='').read()
+          def save(p, s):
+              io.open(p, 'w', encoding='utf-8', newline='').write(s)
+
+          # 1) DTS（CMCC 配方已落位的 25.12 适配版）
+          for d in ('mt7981b-cmcc-rax3000m-nand-lede.dts', 'mt7981b-cmcc-xr30-nand.dts'):
+              p = 'target/linux/mediatek/dts/' + d
+              s = load(p)
+              if NEW not in s:
+                  assert s.count(OLD) == 1, '%s ubi 锚点异常: %d' % (d, s.count(OLD))
+                  save(p, s.replace(OLD, NEW))
+              assert NEW in load(p), '%s 扩展失败' % d
+              print('OK %s: ubi -> %s' % (d, NEW))
+
+          # 2) filogic.mk：只改两台 NAND 设备块的 IMAGE_SIZE
+          p = 'target/linux/mediatek/image/filogic.mk'
+          s = load(p)
+          for dev in ('cmcc_rax3000m-nand', 'cmcc_xr30-nand'):
+              m = re.search(r'define Device/%s\n(.*?)\nendef' % re.escape(dev), s, re.S)
+              assert m, 'filogic.mk 找不到 %s 设备块' % dev
+              b = m.group(1)
+              if IMG_NEW not in b:
+                  assert b.count(IMG_OLD) == 1, '%s IMAGE_SIZE 锚点异常' % dev
+                  s = s[:m.start(1)] + b.replace(IMG_OLD, IMG_NEW) + s[m.end(1):]
+          save(p, s)
+          s = load(p)
+          assert s.count(IMG_NEW) >= 2, 'IMAGE_SIZE 未全部改到位'
+          print('OK filogic.mk: IMAGE_SIZE -> %s' % IMG_NEW)
+          PYEOF
+
+          echo "===== 校验 DTS / IMAGE_SIZE ====="
+          grep -n 'reg = <0x580000' target/linux/mediatek/dts/mt7981b-cmcc-rax3000m-nand-lede.dts \
+                                    target/linux/mediatek/dts/mt7981b-cmcc-xr30-nand.dts
+          grep -n 'IMAGE_SIZE' target/linux/mediatek/image/filogic.mk | grep 496128k || true
+          # DTS 落位核查：6 个设备树文件必须都在
+          for d in mt7981b-cmcc-rax3000m-lede mt7981b-cmcc-rax3000m-nand-lede \
+                   mt7981b-cmcc-rax3000m-emmc-lede \
+                   mt7981b-cmcc-xr30.dtsi mt7981b-cmcc-xr30-nand mt7981b-cmcc-xr30-emmc; do
+            [ -f "target/linux/mediatek/dts/$d" ] || [ -f "target/linux/mediatek/dts/$d.dts" ] \
+              || [ -f "target/linux/mediatek/dts/$d.dtsi" ] \
+              || { echo "::error::DTS 缺失: $d"; exit 1; }
+          done
+          grep -q 'include "mt7981b-cmcc-rax3000m-lede.dts"' \
+            target/linux/mediatek/dts/mt7981b-cmcc-rax3000m-emmc-lede.dts \
+            || { echo "::error::DTS include 未适配 25.12"; exit 1; }
+
+      - name: 应用补丁
+        run: |
+          cd openwrt
+          cp -rn devices/common/patches "devices/$TARGET/" 2>/dev/null || true
+          if [ -n "$(ls -A "devices/$TARGET"/*.bin.patch 2>/dev/null)" ]; then
+            git apply "devices/$TARGET"/patches/*.bin.patch || true
+          fi
+          find "devices/$TARGET/patches" -maxdepth 1 -type f -name '*.revert.patch' -print0 2>/dev/null \
+            | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' -R --no-backup-if-mismatch -p1 -F 1 -i '%'" || true
+          find "devices/$TARGET/patches" -maxdepth 1 -type f -name '*.patch' ! -name '*.revert.patch' ! -name '*.bin.patch' -print0 2>/dev/null \
+            | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' --no-backup-if-mismatch -p1 -F 1 -i '%'" || true
+
+      - name: 启用中文语言包 + 树内 vendor iStore
+        run: |
+          cd openwrt
+          # 打开 luci-i18n-*-zh-cn 生成（否则界面只有英文、iStore 首页被静默剔除）；
+          # 树内 vendor iStore（feed 里的 luci-app-store 会被 kconfig 静默丢弃）
+          bash devices/common/istore-zh.sh
+          # 强制中文：istore-zh.sh 会写 files/etc/uci-defaults/zzz-zh-cn（默认 luci.main.lang=zh-cn）
+          grep -q "luci.main.lang='zh-cn'" files/etc/uci-defaults/zzz-zh-cn \
+            || { echo "::error::默认语言不是 zh-cn（iStore / 界面会显示英文）"; exit 1; }
+          # iStore 界面中文化：store.lua 的 vue_lang() 回退按 LuCI 语言映射（zh* -> zh-cn）
+          fx=$(find "$GITHUB_WORKSPACE" -maxdepth 3 -name fix-istore-lang.sh 2>/dev/null | head -1)
+          if [ -n "$fx" ]; then bash "$fx" .; else echo "::warning::未找到 fix-istore-lang.sh，iStore 语言未处理"; fi
+
+      - name: 注入 vantage 默认主题（树内 vendor + 关 argon）
+        run: |
+          cd openwrt
+          # kiddin9 feed 已在 common/diy.sh 里 install，但 feed 版带架构约束且可能被静默丢弃；
+          # 统一改成树内 vendor（与 lede 的 256M/512M workflow 同一套）
+          if [ ! -f package/luci-theme-vantage/Makefile ]; then
+            if [ -f feeds/kiddin9/luci-theme-vantage/Makefile ]; then
+              cp -a feeds/kiddin9/luci-theme-vantage package/
+            else
+              git clone -q --depth 1 --filter=blob:none --sparse \
+                https://github.com/kiddin9/op-packages.git /tmp/kiddin9-vantage
+              (cd /tmp/kiddin9-vantage && git sparse-checkout set luci-theme-vantage)
+              cp -a /tmp/kiddin9-vantage/luci-theme-vantage package/
+            fi
+          fi
+          test -f package/luci-theme-vantage/Makefile \
+            || { echo "::error::vantage 主题包缺失"; exit 1; }
+          test -d package/luci-theme-vantage/htdocs/luci-static/vantage \
+            || { echo "::error::vantage 主题结构不符合（缺 luci-static/vantage）"; exit 1; }
+          # 移除 argon / bootstrap 抢默认主题的包
+          rm -rf feeds/luci/themes/luci-theme-argon feeds/luci/applications/luci-app-argon-config \
+                 package/feeds/kiddin9/luci-theme-argon package/feeds/kiddin9/luci-app-argon-config
+          # 99 号 uci-defaults 晚于主题包自带的 30 号，强制 mediaurlbase 指向 vantage
+          mkdir -p files/etc/uci-defaults
+          cat > files/etc/uci-defaults/99-luci-theme-vantage <<'UCIDEFAULT'
+          #!/bin/sh
+          uci -q set luci.themes.Vantage='/luci-static/vantage'
+          uci -q set luci.main.mediaurlbase='/luci-static/vantage'
+          uci -q commit luci
+          exit 0
+          UCIDEFAULT
+          chmod +x files/etc/uci-defaults/99-luci-theme-vantage
+          echo "✔ vantage 默认主题已注入，argon 已移除"
+
+      - name: defconfig 并校验机型
+        run: |
+          cd openwrt
+          # 树内新增的包（iStore）必须让 package 元数据重新扫描：
+          # openwrt 的 scan 结果缓存在 tmp/.packageinfo，不删会漏掉刚 vendor 进去的包，
+          # 表现为 tmp/.config-package.in 里没有 PACKAGE_luci-app-store，
+          # .config 写 =y 也会被静默丢弃
+          rm -f tmp/.packageinfo tmp/.config-package.in
+          # 语言开关：luci.mk 里 luci-i18n-*-zh-cn 的 DEFAULT:=LUCI_LANG_zh_Hans，
+          # 不设这个开关，枚举的 zh-cn =y 会被 default 压成 n（zh 数量归 0）
+          echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
+          make defconfig
+          # common/.config 带 CONFIG_TARGET_ALL_PROFILES=y（Kwrt 全量构建用），
+          # defconfig 会展开 filogic 全部 182 个 profile。只追加 "# ... is not set"
+          # 是无效的——已有的 "=y" 行先生效。必须整行删除非白名单 DEVICE 赋值
+          # 再统一追加 n（模式来自 kwrt-mediatek_filogic.yml 的 SMALL_DEVICES
+          # 排除段，2026-11 实证有效）。
+          python3 - <<'PYEOF'
+          import sys
+          keep_syms = {
+              "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000m-nand",
+              "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_xr30-nand",}
+          off = []
+          keep = []
+          for line in open(".config", encoding="utf-8", errors="surrogateescape"):
+              name = line.split("=")[0].replace("# ", "").split(" ")[0]
+              if name.startswith("CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_"):
+                  if name not in keep_syms:
+                      off.append(name)
+                      continue
+              keep.append(line)
+          for s2 in off:
+              keep.append("# %s is not set" % s2 + "\n")
+          open(".config", "w", encoding="utf-8", errors="surrogateescape").writelines(keep)
+          print("已关闭白名单外机型: %d 个" % len(off))
+          PYEOF
+          # 注意：不能沿用全机型构建「Wireless Drivers 全置 n」的做法，
+          # 否则 mt7915e/mt7921e/mt7992 会被关掉，开机没有 WiFi
+          sed -i "s/\(kmod-qca.*\)=m/\1=n/" .config
+          # 全量简体中文语言包：把这次构建里所有存在的 luci-i18n-*-zh-cn 包显式选入
+          # 注意要补 CONFIG_ 前缀：tmp/.config-package.in 里的行是 "config PACKAGE_xxx"
+          # 注意：.config-package.in 的 config 行带 tab 前缀，不能用 ^config 锚定
+          awk '/^[[:space:]]*config PACKAGE_luci-i18n-.+-zh-cn$/{print "CONFIG_"$2"=y"}' tmp/.config-package.in >> .config
+          {
+            echo "CONFIG_PACKAGE_wpad-openssl=y"
+            echo "CONFIG_PACKAGE_wireless-regdb=y"
+            echo "CONFIG_PACKAGE_luci-app-store=y"
+            # kconfig 的 DEPENDS 是“要求”而非“自动选择”，依赖不满足时上面那行会被压成 n，
+            # 所以整条依赖链必须显式选入
+            echo "CONFIG_PACKAGE_luci-lib-taskd=y"
+            echo "CONFIG_PACKAGE_taskd=y"
+            echo "CONFIG_PACKAGE_luci-lua-runtime=y"
+            echo "CONFIG_PACKAGE_libuci-lua=y"
+            echo "CONFIG_PACKAGE_mount-utils=y"
+            echo "CONFIG_PACKAGE_luci-app-ttyd=y"
+            echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y"
+            # store 有 depends on !(PACKAGE_TAR_XZ) || PACKAGE_xz-utils：
+            # tar 被依赖带入后 TAR_XZ 默认=y，xz-utils 不装的话 store 会被压成不可见
+            echo "CONFIG_PACKAGE_xz-utils=y"
+            # 默认主题 vantage；显式关 argon
+            echo "CONFIG_PACKAGE_luci-theme-vantage=y"
+            echo "# CONFIG_PACKAGE_luci-theme-argon is not set"
+            echo "# CONFIG_PACKAGE_luci-app-argon-config is not set"
+          } >> .config
+          make defconfig
+          grep -qE '^CONFIG_PACKAGE_luci-i18n-base-zh-cn=y$' .config \
+            || { echo "::error::简体中文语言包未生效"; exit 1; }
+          grep -qE '^CONFIG_PACKAGE_luci-theme-vantage=y$' .config \
+            || { echo "::error::vantage 主题未生效"; exit 1; }
+
+          # iStore / 中文语言包断言：这两个包都曾因 kconfig 依赖不满足被静默剔除，
+          # 构建全绿但产物里没有，必须在这里卡住
+          for s in luci-app-store luci-i18n-base-zh-cn; do
+            grep -qE "^CONFIG_PACKAGE_${s}=y$" .config \
+              || { echo "::error::${s} 未生效（iStore 或中文包会缺失）"; exit 1; }
+          done
+          # 反向断言：quickstart 首页已全平台撤掉。它的 home 是独立单页壳子，
+          # 靠 /admin/quickstart/* 的 XHR 拉数据，精简固件里后端起不来就白屏，
+          # 连 vantage 的侧边栏（由页面自身渲染）一起消失。
+          if grep -qE '^CONFIG_PACKAGE_(luci-app-)?quickstart=y$' .config; then
+            echo "::error::quickstart 又被选入（会导致首页白屏 / 无侧边栏）"; exit 1
+          fi
+          n=$(grep -cE '^CONFIG_PACKAGE_luci-i18n-.+-zh-cn=y$' .config || true)
+          [ "$n" -ge 5 ] || { echo "::error::简体中文语言包数量异常：$n"; exit 1; }
+          echo "✔ iStore 已选入，简体中文语言包 $n 个"
+
+          echo "===== 启用的机型 ====="
+          grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config
+          n=$(grep -cE '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config || true)
+          [ "$n" -eq "$MIN_DEVICES" ] || { echo "::error::机型数量应为 $MIN_DEVICES，实际 $n"; exit 1; }
+          # 白名单逐一核查（注意：设备 profile 符号保留连字符，如 cetron_ct3003-mod，
+          # 绝不能把 '-' 换成 '_'，否则符号不存在被 defconfig 静默丢弃）
+          miss=""
+          for d in $DEVICES; do
+            sym="CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${d}=y"
+            grep -q "^${sym}$" .config || miss="$miss $d"
+          done
+          [ -z "$miss" ] || { echo "::error::机型未生效：$miss"; exit 1; }
+          grep -q '^CONFIG_TARGET_mediatek_filogic=y' .config || { echo "::error::target 未生效"; exit 1; }
+
+      - name: 编译固件
+        run: |
+          set -o pipefail
+          cd openwrt
+          df -hT
+          rm -f build.log
+          ok=0
+          PARTIAL=0
+          for attempt in 1 2 3; do
+            echo "===== world 第 $attempt 轮 ====="
+            if make -j"$(( $(nproc) + 1 ))" 2>&1 | tee -a build.log; then ok=1; break; fi
+            echo "::warning::第 $attempt 轮并行编译失败，取错误日志"
+            grep -nE 'Error [0-9]+|error:|No rule to make target|failed to build' build.log | tail -40 || true
+            mapfile -t pkgs < <(grep -oE '(package|feeds|tools|toolchain|target)/[A-Za-z0-9_./-]+( \[[a-zA-Z0-9_]+\])? failed to build' build.log \
+                                  | sed 's/ failed to build$//' | sort -u)
+            [ "${#pkgs[@]}" -gt 0 ] || { echo "::error::日志里没识别出失败包"; tail -80 build.log; exit 1; }
+            die=0
+            for pkg in "${pkgs[@]}"; do
+              case "$pkg" in
+                target/linux) tgt="target/install" ;;
+                *" [host]")   tgt="${pkg% \[host\]}/host/compile" ;;
+                *" ["*)       tgt="${pkg% \[*}/compile" ;;
+                *)            tgt="$pkg/compile" ;;
+              esac
+              echo "" >> build.log
+              echo "===== 详细错误（make -j1 V=s $tgt）=====" >> build.log
+              if timeout 3600 make -j1 V=s "$tgt" 2>&1 | tail -400 | tee -a build.log; then
+                echo "::warning::$tgt 单线程重跑成功（并行竞态），继续后续编译" | tee -a build.log
+              else
+                case "$pkg" in
+                  target/linux)
+                    echo "::warning::target/install 仍失败，改用 make -k 继续生成其余机型" | tee -a build.log
+                    make -k -j1 target/install 2>&1 \
+                      | grep -E "WARNING: Image file .* is too big|Error [0-9]+|ERROR: |No such file" \
+                      | tail -40 | tee -a build.log || true
+                    PARTIAL=1
+                    ;;
+                  *)
+                    echo "::error::$tgt 单线程重跑仍失败" | tee -a build.log
+                    die=1
+                    ;;
+                esac
+              fi
+            done
+            if [ "$die" = 1 ]; then
+              echo "===== bin/targets 现状 =====" | tee -a build.log
+              ls -lR bin/targets 2>&1 | tail -80 | tee -a build.log || true
+              exit 1
+            fi
+            if [ "${PARTIAL:-0}" = 1 ]; then
+              echo "::warning::部分机型镜像未生成，其余机型继续发布"
+              ok=1
+              break
+            fi
+          done
+          [ "$ok" = 1 ] || { echo "::error::编译 3 轮后仍未成功"; exit 1; }
+          df -hT
+
+      - name: 上传编译日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            openwrt/build.log
+            openwrt/logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: 收集产物（NAND 双机型：factory + sysupgrade 共 4 个）
+        id: collect
+        run: |
+          mkdir -p out
+          B=openwrt/bin/targets/mediatek/filogic
+          ls -lh "$B" | head -40
+          for d in $DEVICES; do
+            cp -f "$B"/*"$d"-squashfs-factory.bin "$B"/*"$d"-squashfs-sysupgrade.bin out/ 2>/dev/null || true
+          done
+          # 只留 4 个固件：initramfs / itb / manifest / profiles.json / 其它机型一律剔除
+          KEEP="cmcc_rax3000m-nand-squashfs-factory.bin cmcc_rax3000m-nand-squashfs-sysupgrade.bin cmcc_xr30-nand-squashfs-factory.bin cmcc_xr30-nand-squashfs-sysupgrade.bin"
+          for f in out/*; do
+            [ -f "$f" ] || continue
+            b=$(basename "$f")
+            keep=0
+            for k in $KEEP; do
+              case "$b" in *"$k") keep=1 ;; esac
+            done
+            [ "$keep" = 1 ] || { echo "剔除多余文件: $f"; rm -f "$f"; }
+          done
+          cnt=$(ls -1 out | wc -l)
+          [ "$cnt" -eq 4 ] || { echo "::error::out/ 固件数应为 4（2 台 NAND × factory+sysupgrade），实际 $cnt"; ls -lh out; exit 1; }
+          ls -lh out
+          miss=""
+          for d in $DEVICES; do
+            ls out/*"$d"-squashfs-factory.bin >/dev/null 2>&1 || miss="$miss ${d}:factory"
+            ls out/*"$d"-squashfs-sysupgrade.bin >/dev/null 2>&1 || miss="$miss ${d}:sysupgrade"
+          done
+          [ -z "$miss" ] || { echo "::error::产物不符合预期：$miss"; ls out; exit 1; }
+          # 引导工件硬性拒绝：出现 preloader / bl31 / gpt / itb 一律中止发布（防误刷变砖）
+          if ls out/ | grep -qiE 'preloader|bl31|gpt|\.itb$'; then
+            echo "::error::产物里出现引导工件或 itb，拒绝发布"; ls out; exit 1
+          fi
+          (cd out && sha256sum ./* > sha256sums.txt)
+          DU=$(du -sh out | cut -f1)
+          echo "size=$DU" >> "$GITHUB_OUTPUT"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: kwrt-rax3000m-xr30-512m-nand-images
+          path: out/
+          retention-days: 14
+
+      - name: 发布 Release
+        id: pub
+        # 失败不判死，交给下面 gh CLI 重试（二次限流很常见）
+        continue-on-error: true
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.make_release != false }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_PREFIX }}-${{ env.DATE }}
+          name: Kwrt CMCC RAX3000M / XR30 NAND 512M (${{ env.DATE }})
+          body: |
+            Kwrt CMCC RAX3000M / XR30（NAND 硬改 512M Flash）—— 从 tvliving/lede 移植
+
+            - 源码: openwrt/openwrt `openwrt-25.12` + Kwrt `devices/common` 定制 + CMCC lede 移植配方
+            - 机型: cmcc_rax3000m-nand / cmcc_xr30-nand（两台，硬件同源，固件可互换刷写）
+            - 分区: ubi 114MB → **490MiB**（0x580000 + 0x580000 + 0x1EA00000），IMAGE_SIZE 496128k
+            - 引导: KERNEL_IN_UBI + sysupgrade-tar，**沿用机器现有 U-Boot，不刷 preloader / fip / gpt**
+            - 产物: 每台 `*-squashfs-factory.bin`（UBI 全量首次刷入）+ `*-squashfs-sysupgrade.bin`（系统内升级）
+            - 界面: iStore 软件市场 + 默认 vantage 主题 + 强制简体中文（zh-cn）+ 全量简体中文语言包
+            - 首页: 标准 LuCI 概览（vantage 主题下）
+            - 默认 IP: 10.0.0.1 / 用户名 root / 无密码
+            - 定时: 每周六 21:00（北京时间）自动编译
+            - 工作流: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            ### 刷机提示
+
+            ⚠️ 必须是硬改 512M Flash + 512M 大分区 U-Boot（Web UI 选 512m 布局），128M/256M 的 U-Boot 会启动失败。
+            1. 首次刷入：`*-squashfs-factory.bin` 走 U-Boot Web 写入 ubi 分区
+            2. 系统内升级：`*-squashfs-sysupgrade.bin`（LuCI 备份/升级 或 `sysupgrade -n`，跨发行版建议不保留配置）
+            3. 本页不含任何引导工件；大分区 Flash 需先确认 U-Boot 支持对应布局
+          files: out/*
+          fail_on_unmatched_files: false
+
+      - name: 重试上传 Release 资产（GitHub 二次限流兜底）
+        if: ${{ steps.pub.outcome == 'failure' && !cancelled() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          tag="${{ env.TAG_PREFIX }}-${{ env.DATE }}"
+          title="Kwrt CMCC RAX3000M / XR30 NAND 512M (${{ env.DATE }})"
+          echo ">>> 目标 tag: $tag"
+          for i in 1 2 3 4 5; do
+            echo ">>> 第 $i 次尝试上传"
+            if ! gh release view "$tag" > /dev/null 2>&1; then
+              gh release create "$tag" --title "$title" --notes "见 Actions 运行记录 ${{ github.run_id }}" || true
+            fi
+            if gh release upload "$tag" out/* --clobber; then
+              echo ">>> 上传成功（第 $i 次）"
+              exit 0
+            fi
+            echo ">>> 第 $i 次失败，$((i*30)) 秒后重试"
+            sleep $((i*30))
+          done
+          echo "::error::Release 资产上传仍失败（多为 GitHub 二次限流），产物已保留在 Actions artifact 里"
+          exit 1
