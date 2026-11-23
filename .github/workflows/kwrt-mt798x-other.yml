@@ -1,9 +1,10 @@
-# Kwrt MT798x 其他机型（从 tvliving/lede 移植，openwrt-25.12 上游没有的 15 个设备）固件构建
+# Kwrt MT798x 其他机型（从 tvliving/lede 移植，openwrt-25.12 上游没有的 13 个设备）固件构建
 #
-# 机型（15）：cetron_ct3003-mod / clx_s20l / cmcc_a10-mod / cmcc_rax3000me-emmc /
-#   cmcc_rax3000me-nand / cmcc_xr30-emmc / cmcc_xr30-nand / cudy_tr3000-mod /
-#   fzs_5gcpe-p3 / hf_m7986r1-emmc / hf_m7986r1-nand / huasifei_ws3006 /
-#   huasifei_ws3009 / jdcloud_re-cs-05 / tplink_tl-7dr7299-v1
+# 机型（13）：cetron_ct3003-mod / clx_s20l / cmcc_a10-mod / cmcc_rax3000me-emmc /
+#   cmcc_rax3000me-nand / cudy_tr3000-mod / fzs_5gcpe-p3 / hf_m7986r1-emmc /
+#   hf_m7986r1-nand / huasifei_ws3006 / huasifei_ws3009 / jdcloud_re-cs-05 /
+#   tplink_tl-7dr7299-v1
+# 注：CMCC XR30（NAND / eMMC）已移到 kwrt-cmcc-mt7981.yml，与本表不重复编译
 #
 # 机型方案与 tvliving/lede master 一致（lede 版实测可正常开机）：
 #   NAND/UBI：kernel FIT 放 UBI 卷 + sysupgrade-tar；eMMC：kernel/rootfs 独立分区 +
@@ -35,11 +36,11 @@ env:
   TZ: Asia/Shanghai
   TARGET: mediatek_filogic_mt798x_other
   TAG_PREFIX: kwrt-mt798x-other
-  MIN_DEVICES: '15'
+  MIN_DEVICES: '13'
   DEVICES: >-
     cetron_ct3003-mod clx_s20l cmcc_a10-mod cmcc_rax3000me-emmc cmcc_rax3000me-nand
-    cmcc_xr30-emmc cmcc_xr30-nand cudy_tr3000-mod fzs_5gcpe-p3 hf_m7986r1-emmc
-    hf_m7986r1-nand huasifei_ws3006 huasifei_ws3009 jdcloud_re-cs-05 tplink_tl-7dr7299-v1
+    cudy_tr3000-mod fzs_5gcpe-p3 hf_m7986r1-emmc hf_m7986r1-nand huasifei_ws3006
+    huasifei_ws3009 jdcloud_re-cs-05 tplink_tl-7dr7299-v1
 
 jobs:
   build:
@@ -195,8 +196,6 @@ jobs:
               "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_a10-mod",
               "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000me-emmc",
               "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_rax3000me-nand",
-              "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_xr30-emmc",
-              "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cmcc_xr30-nand",
               "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cudy_tr3000-mod",
               "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_fzs_5gcpe-p3",
               "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_hf_m7986r1-emmc",
@@ -358,11 +357,11 @@ jobs:
                 openwrt/bin/targets/mediatek/filogic/sha256sums \
                 out/ 2>/dev/null || true
           ls -lh out | head -40
-          # 15 个机型每个都必须有 sysupgrade 产物（sysupgrade.bin / sysupgrade.itb）
+          # 13 个机型每个都必须有 sysupgrade 产物（sysupgrade.bin / sysupgrade.itb）
           miss=""
           for d in cetron_ct3003-mod clx_s20l cmcc_a10-mod cmcc_rax3000me-emmc cmcc_rax3000me-nand \
-                   cmcc_xr30-emmc cmcc_xr30-nand cudy_tr3000-mod fzs_5gcpe-p3 hf_m7986r1-emmc \
-                   hf_m7986r1-nand huasifei_ws3006 huasifei_ws3009 jdcloud_re-cs-05 tplink_tl-7dr7299-v1; do
+                   cudy_tr3000-mod fzs_5gcpe-p3 hf_m7986r1-emmc hf_m7986r1-nand huasifei_ws3006 \
+                   huasifei_ws3009 jdcloud_re-cs-05 tplink_tl-7dr7299-v1; do
             ls out/*"$d"*-sysupgrade.* >/dev/null 2>&1 || miss="$miss $d"
           done
           [ -z "$miss" ] || { echo "::error::以下机型缺 sysupgrade 产物：$miss"; ls out; exit 1; }
@@ -391,13 +390,13 @@ jobs:
           tag_name: ${{ env.TAG_PREFIX }}-${{ env.DATE }}
           name: Kwrt MT798x Other Devices (${{ env.DATE }})
           body: |
-            Kwrt MT798x 其他机型自动编译（从 tvliving/lede 移植，openwrt-25.12 上游没有的 15 款）
+            Kwrt MT798x 其他机型自动编译（从 tvliving/lede 移植，openwrt-25.12 上游没有的 13 款）
 
             - 源码: openwrt/openwrt `openwrt-25.12` + Kwrt `devices/common` 定制
             - 机型: cetron_ct3003-mod / clx_s20l / cmcc_a10-mod / cmcc_rax3000me-emmc /
-              cmcc_rax3000me-nand / cmcc_xr30-emmc / cmcc_xr30-nand / cudy_tr3000-mod /
-              fzs_5gcpe-p3 / hf_m7986r1-emmc / hf_m7986r1-nand / huasifei_ws3006 /
-              huasifei_ws3009 / jdcloud_re-cs-05 / tplink_tl-7dr7299-v1
+              cmcc_rax3000me-nand / cudy_tr3000-mod / fzs_5gcpe-p3 / hf_m7986r1-emmc /
+              hf_m7986r1-nand / huasifei_ws3006 / huasifei_ws3009 / jdcloud_re-cs-05 /
+              tplink_tl-7dr7299-v1
             - 机型方案: 与 tvliving/lede master 一致（sysupgrade-tar / emmc 分区 / fitblk itb）
             - 引导: **沿用机器现有 U-Boot，不刷 preloader / fip / gpt**
             - 默认主题: luci-theme-vantage；含 iStore 软件市场 + 全量简体中文语言包
