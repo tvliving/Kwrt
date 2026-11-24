@@ -757,8 +757,18 @@ jobs:
           ls out | grep -q "^${PREFIX}-" || { echo "::error::产物名不是 ${PREFIX}- 前缀"; ls out; exit 1; }
 
           # 用镜像 manifest 做端到端校验：无线驱动、主题、iStore、中文必须在最终 rootfs 里
-          MAN=$(ls out/*.manifest 2>/dev/null | head -1)
-          [ -n "$MAN" ] || { echo "::error::缺 manifest，无法校验包清单"; ls out; exit 1; }
+          # sysupgrade-tar 机型通常不生成 .manifest，缺省时从镜像内 CONTROL 取包清单
+          MAN=$(ls out/*"$DEV"*.manifest 2>/dev/null | head -1)
+          if [ -z "$MAN" ]; then
+            IMG=$(ls out/*"$DEV"*sysupgrade* 2>/dev/null | head -1)
+            if [ -n "$IMG" ]; then
+              TMPD=$(mktemp -d)
+              tar -xf "$IMG" -C "$TMPD" 2>/dev/null || true
+              MAN=$(ls "$TMPD"/*/CONTROL 2>/dev/null | head -1)
+              [ -n "$MAN" ] && echo "[info] 无 .manifest，改用镜像内 CONTROL 校验：$MAN"
+            fi
+          fi
+          [ -n "$MAN" ] || { echo "::error::缺 manifest 且镜像内无 CONTROL，无法校验包清单"; ls -lh out; exit 1; }
           echo "===== 包清单校验（$MAN）====="
           miss=0
           for k in $WIFI_PKGS luci-app-store "luci-theme-${THEME}" luci-i18n-base-zh-cn; do
