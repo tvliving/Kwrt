@@ -780,8 +780,32 @@ jobs:
           ls out | grep -q "^${PREFIX}-" || { echo "::error::产物名不是 ${PREFIX}- 前缀"; ls out; exit 1; }
 
           # 用镜像 manifest 做端到端校验：无线驱动、主题、iStore、中文必须在最终 rootfs 里
-          MAN=$(ls out/*.manifest 2>/dev/null | head -1)
-          [ -n "$MAN" ] || { echo "::error::缺 manifest，无法校验包清单"; ls out; exit 1; }
+          # 注意：本步骤启用了 nullglob + set -u，必须用数组判断；否则 ls 在无匹配时会列出
+          # 当前目录，把 openwrt/LICENSE 当成 manifest（正是 11-24 全 5 机型失败的原因）。
+          manif=( out/*"$DEV"*.manifest )
+          MAN=""
+          if [ ${#manif[@]} -gt 0 ]; then MAN="${manif[0]}"; fi
+          if [ -z "$MAN" ]; then
+            # sysupgrade-tar 机型通常不生成 .manifest，改从镜像内 CONTROL 取包清单
+            imgs=( out/*"$DEV"*sysupgrade* )
+            IMG=""
+            for f in ${imgs[@]+"${imgs[@]}"}; do
+              case "$f" in *.sha256|*.json|*.buildinfo) continue ;; esac
+              IMG="$f"; break
+            done
+            if [ -n "$IMG" ]; then
+              TMPD=$(mktemp -d)
+              tar -xf "$IMG" -C "$TMPD" || true
+              ctrls=( "$TMPD"/*/CONTROL )
+              if [ ${#ctrls[@]} -gt 0 ]; then
+                MAN="${ctrls[0]}"
+                echo "[info] 无 .manifest，改用镜像内 CONTROL 校验：$MAN"
+              fi
+            fi
+          fi
+          if [ -z "$MAN" ]; then
+            echo "::error::缺 manifest 且镜像内无 CONTROL，无法校验包清单"; ls -lh out; exit 1
+          fi
           echo "===== 包清单校验（$MAN）====="
           miss=0
           for k in $WIFI_PKGS luci-app-store "luci-theme-${THEME}" luci-i18n-base-zh-cn; do
