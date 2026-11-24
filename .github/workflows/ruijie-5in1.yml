@@ -1,0 +1,871 @@
+# Kwrt 锐捷 5 机型定时构建（EW-6000GX PRO / RG-X60 New / RG-X30E Pro / RG-X30E / RG-BE72 Pro）
+#
+# 本文件在 tvliving/lede、tvliving/Kwrt、tvliving/immortalwrt-mt798x-action、
+# s9xxx/immortalwrt-mt798x-6.6 四仓库保持同一套逻辑，只有主题/首页/发行名不同：
+#   源码底座：上游 openwrt-25.12 + 本仓库 devices-pack/<slug>
+#   网口映射：devices-pack/<slug>/files/etc/board.d（按机型硬断言 LAN/WAN）
+#   自包含  ：设备注入/无线脚本/硬断言已内联，不依赖外部 inject.sh
+#   无线    ：首启 97-ruijie-wifi 按 band 生成双频 AP，随后 99-wifi-boost 做增强
+#   界面    ：vantage 主题 + iStore 市场 + 强制简体中文 + 标准 LuCI 首页（状态-概览）
+#
+# 发布：tag = kwrt-25.12-<北京日期>（例 kwrt-25.12-20261124），
+#      一次构建只发一个 Release，不再出现 openwrt-* 与 kwrt-* 两份。
+name: Kwrt 锐捷 5 机型 · 定时构建
+
+on:
+  schedule:
+    # 北京时间每周一 08:30 = UTC 00:30
+    - cron: '30 0 * * 1'
+  workflow_dispatch:
+    inputs:
+      make_release:
+        description: '编译完成后发布 Release'
+        type: boolean
+        default: true
+      slug:
+        description: '只构建某个机型（all = 全部）'
+        type: choice
+        default: 'all'
+        options: ['all', 'ew6000gx', 'x60new', 'x30epro', 'rgx30e', 'be72pro']
+  push:
+    branches: [25.12]
+    paths:
+      - '.github/workflows/ruijie-5in1.yml'
+      - '.github/scripts/ruijie-5in1-inject.sh'
+      - 'scripts/apply-pack.py'
+      - 'scripts/customize.sh'
+      - 'devices-pack/**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ruijie-5in1-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Shanghai
+  DIST: 'Kwrt'
+  PREFIX: 'kwrt'
+  VERSION: '25.12'
+  THEME: 'vantage'
+  HOME_APP: 'standard'
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 1500M
+  CCACHE_COMPRESS: 'true'
+  CCACHE_NOHASHDIR: 'true'
+
+jobs:
+  build:
+    name: 🏗️ ${{ matrix.title }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      SLUG: ${{ matrix.slug }}
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        include:
+          - slug: ew6000gx
+            title: EW-6000GX PRO (MT7986A)
+          - slug: x60new
+            title: RG-X60 New (MT7986A)
+          - slug: x30epro
+            title: RG-X30E Pro (MT7981B)
+          - slug: rgx30e
+            title: RG-X30E (MT7981B)
+          - slug: be72pro
+            title: RG-BE72 Pro (MT7988D)
+    steps:
+      - name: 是否跳过（手动指定其它机型时）
+        id: pick
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.slug != 'all' && github.event.inputs.slug != matrix.slug }}
+        run: echo "selected=false" >> "$GITHUB_OUTPUT"
+
+      - name: 检出构建仓库
+        if: steps.pick.outputs.selected != 'false'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 释放磁盘空间并加大 swap
+        if: steps.pick.outputs.selected != 'false'
+        run: |
+          echo "===== 释放前 ====="
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache /usr/local/share/boost \
+                      /usr/local/lib/node_modules /usr/lib/jvm \
+                      /usr/share/swift /usr/share/miniconda /usr/share/rust \
+                      /usr/share/kotlinc /usr/share/gradle-* /opt/az \
+                      /opt/microsoft /usr/local/aws-cli /usr/local/.ghcup \
+                      /etc/mysql /etc/php /usr/local/go /opt/pipx 2>/dev/null || true
+          sudo systemctl stop docker docker.socket containerd 2>/dev/null || true
+          sudo rm -rf /var/lib/docker /var/lib/containerd 2>/dev/null || true
+          sudo pkill -9 -f dockerd 2>/dev/null || true
+          sudo pkill -9 -f containerd 2>/dev/null || true
+          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* 2>/dev/null || true
+          sudo apt-get clean 2>/dev/null || true
+          sudo rm -rf /snap /var/lib/snapd 2>/dev/null || true
+          sudo journalctl --vacuum-size=32M 2>/dev/null || true
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /swapfile /mnt/swapfile 2>/dev/null || true
+          if sudo fallocate -l 4G /swapfile 2>/dev/null; then
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile >/dev/null 2>&1 && sudo swapon /swapfile && echo ">>> swap 4G 已启用"
+          else
+            echo "::warning::swap 创建失败，继续"
+          fi
+          echo "===== 释放后 ====="
+          df -h / | tail -1
+          free -h
+
+      - name: 安装编译依赖
+        if: steps.pick.outputs.selected != 'false'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get update -qq -o Acquire::Retries=3 || sudo -E apt-get update -qq
+          for i in 1 2 3; do
+            if timeout 1500 sudo -E apt-get install -y --no-install-recommends \
+              build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+              gettext git libncurses5-dev libssl-dev libelf-dev python3-setuptools \
+              rsync swig unzip zlib1g-dev file wget dwarves llvm python3-pyelftools \
+              libpython3-dev aria2 jq ccache rename device-tree-compiler \
+              libgmp3-dev libmpc-dev pahole libdw-dev zstd \
+              autoconf automake autopoint binutils bzip2 cpio curl genisoimage \
+              gperf haveged help2man intltool libc6-dev-i386 libfuse-dev \
+              libglib2.0-dev libltdl-dev libmpfr-dev libncurses-dev \
+              libncursesw5-dev libreadline-dev libtool libxslt1-dev lrzsz msmtp \
+              ninja-build p7zip p7zip-full patch pkgconf python3-ply python3-docutils \
+              python3-pyelftools qemu-utils scons squashfs-tools subversion texinfo \
+              uglifyjs upx-ucl vim xxd; then
+              echo ">>> 依赖安装完成"
+              break
+            fi
+            echo ">>> 第 $i 次安装失败，30 秒后重试"
+            sleep 30
+          done
+          sudo timedatectl set-timezone "Asia/Shanghai"
+          ccache --version | head -1 || echo "::warning::ccache 不可用"
+
+      - name: 准备源码树（上游 openwrt-25.12）
+        if: steps.pick.outputs.selected != 'false'
+        run: |
+          rm -rf openwrt .owrt-src
+          for i in 1 2 3; do
+            git clone -q --depth 1 -b openwrt-25.12 https://github.com/openwrt/openwrt .owrt-src && break
+            echo "::warning::clone 第 $i 次失败，重试"
+            rm -rf .owrt-src
+            sleep 10
+          done
+          [ -d .owrt-src ] || { echo "::error::上游源码克隆失败"; exit 1; }
+          mv .owrt-src openwrt
+          echo ">>> 源码树就绪：$(cd openwrt && git rev-parse --short HEAD)"
+
+      - name: 修补上游 libsepol / libselinux 3.9 的 InstallDev（公共头与 .pc）
+        if: steps.pick.outputs.selected != 'false'
+        run: |
+          set -euo pipefail
+          cd openwrt
+          python3 - <<'PY'
+          import io
+
+          # 上游 25.12 的 libsepol / libselinux 都是 3.9，InstallDev 统一从
+          # $(PKG_INSTALL_DIR)/usr/include/* 与 usr/lib/pkgconfig/<name>.pc 取文件。
+          # 但 3.9 的 make install 并不稳定地把公共头落地：
+          #   libsepol 公共头在 include/sepol（src/*.h 全是私有头，没有 sepol.h）
+          #   libselinux 公共头在 include/selinux
+          #   .pc 由 make all 生成在 src/<name>.pc
+          # 只修 libsepol 会先报 sepol/sepol.h: No such file or directory，
+          # 修完后 libselinux 的 InstallDev 又以同样方式失败。两个包一起修：
+          # 原 ipkg-install 拷贝保留但吞掉缺失错误，再无条件从构建目录补全套公共头/.pc。
+          def fix(path, name, hdr):
+              s = io.open(path, encoding='utf-8').read()
+              old_hdr = '\t$(CP) $(PKG_INSTALL_DIR)/usr/include/* $(1)/usr/include/'
+              new_hdr = ('\t$(CP) $(PKG_INSTALL_DIR)/usr/include/* $(1)/usr/include/ 2>/dev/null || true\n'
+                         '\t$(CP) $(PKG_BUILD_DIR)/%s $(1)/usr/include/' % hdr)
+              old_pc = ('\t$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/lib/pkgconfig/%s.pc '
+                        '$(1)/usr/lib/pkgconfig/') % name
+              new_pc = ('\t$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/lib/pkgconfig/%s.pc '
+                        '$(1)/usr/lib/pkgconfig/ 2>/dev/null || true\n'
+                        '\t$(INSTALL_DATA) $(PKG_BUILD_DIR)/src/%s.pc '
+                        '$(1)/usr/lib/pkgconfig/') % (name, name)
+              n = 0
+              if old_hdr in s:
+                  s = s.replace(old_hdr, new_hdr, 1)
+                  n += 1
+              if old_pc in s:
+                  s = s.replace(old_pc, new_pc, 1)
+                  n += 1
+              io.open(path, 'w', encoding='utf-8').write(s)
+              print('>>> %s: patched %d places (headers + .pc)' % (name, n))
+              return n
+
+          a = fix('package/libs/libsepol/Makefile', 'libsepol', 'include/sepol')
+          b = fix('package/libs/libselinux/Makefile', 'libselinux', 'include/selinux')
+          # libselinux 3.9 的 utils/Makefile 用 `-lsepol` 链接 sefcontext_compile，
+          # 但 OpenWrt 25.12 的 TARGET_LDFLAGS 不含 -L$(STAGING_DIR)/usr/lib，
+          # 现存的那个 -L 又出现在 -lsepol 之后，链接器从左到右解析时找不到 libsepol。
+          p = 'package/libs/libselinux/Makefile'
+          s = io.open(p, encoding='utf-8').read()
+          line = 'TARGET_LDFLAGS += -L$(STAGING_DIR)/usr/lib'
+          if line not in s and 'define Build/Compile' in s:
+              s = s.replace('define Build/Compile', line + '\n\n' + 'define Build/Compile', 1)
+              io.open(p, 'w', encoding='utf-8').write(s)
+              print('>>> libselinux: added TARGET_LDFLAGS -L staging/usr/lib')
+          # 3.9 的 make install 落库路径不稳，InstallDev 再从构建目录兜底拷静态库
+          p = 'package/libs/libsepol/Makefile'
+          s = io.open(p, encoding='utf-8').read()
+          needle = '\t$(CP) $(PKG_INSTALL_DIR)/usr/lib/* $(1)/usr/lib/'
+          add = (needle + ' 2>/dev/null || true\n'
+                 '\t$(CP) $(PKG_BUILD_DIR)/src/libsepol.a $(1)/usr/lib/ 2>/dev/null || true')
+          if needle in s and add not in s:
+              s = s.replace(needle, add, 1)
+              io.open(p, 'w', encoding='utf-8').write(s)
+              print('>>> libsepol: staged libsepol.a fallback from build dir')
+          # mtd-utils configure 探测到 staging 的 libselinux.pc 会自动打开
+          # SELinux 支持并链接 -lselinux；但 3.9/3.10 的 InstallDev 不落
+          # libselinux.so，mkfs.ubifs 链接报 cannot find -lselinux。本固件
+          # 不需要 SELinux xattr，显式关闭这个可选探测。
+          p = 'package/utils/mtd-utils/Makefile'
+          s = io.open(p, encoding='utf-8').read()
+          anchor = 'include $(INCLUDE_DIR)/package.mk'
+          line = 'CONFIGURE_ARGS += --without-selinux'
+          if line not in s and anchor in s:
+              s = s.replace(anchor, anchor + '\n' + line, 1)
+              io.open(p, 'w', encoding='utf-8').write(s)
+              print('>>> mtd-utils: --without-selinux (libselinux.pc auto-probe)')
+          if a != 2 or b != 2:
+              raise SystemExit('::error::libsepol/libselinux InstallDev patch incomplete')
+          PY
+          grep -q 'PKG_BUILD_DIR)/include/sepol' package/libs/libsepol/Makefile \
+            || { echo "::error::libsepol 公共头补丁未生效"; exit 1; }
+          grep -q 'PKG_BUILD_DIR)/src/libselinux.pc' package/libs/libselinux/Makefile \
+            || { echo "::error::libselinux .pc 补丁未生效"; exit 1; }
+          grep -q 'CONFIGURE_ARGS += --without-selinux' package/utils/mtd-utils/Makefile \
+            || { echo "::error::mtd-utils --without-selinux 补丁未生效"; exit 1; }
+
+      - name: 恢复 ccache
+        if: steps.pick.outputs.selected != 'false'
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-ruijie5-${{ matrix.slug }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-ruijie5-${{ matrix.slug }}-
+            ccache-ruijie5-
+
+      - name: 注入设备包（网口 / 无线 / DTS 硬断言）
+        if: steps.pick.outputs.selected != 'false'
+        env:
+          SLUG: ${{ matrix.slug }}
+          SOURCE_ROOT: openwrt
+        run: |
+          cat > /tmp/ruijie-inject.sh <<'RUIJIE_INJECT_EOF'
+          set -euo pipefail
+          
+          SLUG="${SLUG:?SLUG 未设置（ew6000gx|x60new|x30epro|rgx30e|be72pro）}"
+          SRC="${SOURCE_ROOT:-${1:-openwrt}}"
+          [ -d "$SRC" ] || { echo "::error::源码树不存在: $SRC"; exit 1; }
+          SRC="$(cd "$SRC" && pwd)"
+          PACK="$(pwd)/devices-pack/$SLUG"
+          
+          [ -d "$PACK" ] || { echo "::error::找不到设备包 $PACK"; exit 1; }
+          [ -d "$SRC/target/linux/mediatek" ] || { echo "::error::$SRC 不是 OpenWrt 源码树（缺 target/linux/mediatek）"; exit 1; }
+          
+          # 机型元数据：网口期望 + SSID 前缀（唯一来源）
+          case "$SLUG" in
+            ew6000gx) LAN_EXPECT='lan1 lan2 lan3 lan4';             WAN_EXPECT='eth1';   SSID_BASE='EW6000GX' ;;
+            x60new)   LAN_EXPECT='lan1 lan2 lan3';                  WAN_EXPECT='eth1';   SSID_BASE='X60NEW' ;;
+            x30epro)  LAN_EXPECT='lan1 lan2 lan3';                  WAN_EXPECT='wan';    SSID_BASE='X30EPRO' ;;
+            rgx30e)   LAN_EXPECT='lan1 lan2 lan3';                  WAN_EXPECT='wan';    SSID_BASE='X30E' ;;
+            be72pro)  LAN_EXPECT='lan1 lan2 lan3 lan4 eth2.2 eth1'; WAN_EXPECT='eth2.1'; SSID_BASE='BE72PRO' ;;
+            *) echo "::error::不支持的 SLUG=$SLUG"; exit 1 ;;
+          esac
+          
+          DEV=$(sed -n 's/^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_\(.*\)=y$/\1/p' "$PACK/config.fragment" | head -1 | tr -d '\r')
+          [ -n "$DEV" ] || { echo "::error::$PACK/config.fragment 里没有 CONFIG_TARGET_DEVICE_...=y"; exit 1; }
+          echo ">>> SLUG=$SLUG DEVICE=$DEV"
+          
+          # 1) 设备包注入（DTS / filogic.mk 设备块 / files 覆盖层含 board.d 网口映射）
+          python3 scripts/apply-pack.py "$SRC" "$SLUG"
+          
+          # 兼容老版 apply-pack.py：统一自己铺一遍 files 覆盖层，幂等
+          if [ -d "$PACK/files" ]; then
+            ( cd "$PACK/files" && find . -type f -print0 | while IFS= read -r -d '' f; do
+                dst="$SRC/files/${f#./}"
+                mkdir -p "$(dirname "$dst")"
+                cp -f "$f" "$dst"
+              done )
+            find "$SRC/files/etc/board.d" -type f -exec chmod 755 {} + 2>/dev/null || true
+            find "$SRC/files/etc/uci-defaults" -type f -exec chmod 755 {} + 2>/dev/null || true
+            echo ">>> 覆盖层就绪：$SRC/files（$(find "$SRC/files" -type f | wc -l) 个文件）"
+          fi
+          
+          # 2) BE72 Pro 专用 RTL837x 交换芯片驱动（包内 packages/ 可选）
+          if [ -d "$PACK/packages" ]; then
+            mkdir -p "$SRC/package/kernel"
+            cp -r "$PACK"/packages/* "$SRC/package/kernel/"
+            echo ">>> 已注入交换芯片驱动: $(ls "$PACK/packages" | tr '\n' ' ')"
+          fi
+          
+          # 2.5) 去掉 factory 产物：这 5 台都是多分区 U-Boot
+          python3 - "$SRC" "$DEV" <<'PY'
+          import io
+          import re
+          import sys
+          
+          src, dev = sys.argv[1], sys.argv[2]
+          p = src + '/target/linux/mediatek/image/filogic.mk'
+          s = io.open(p, encoding='utf-8', newline='').read()
+          start = 'define Device/' + dev + '\n'
+          assert start in s, 'filogic.mk 缺 ' + start.strip()
+          
+          
+          def block(text):
+              i = text.index(start)
+              j = text.index('TARGET_DEVICES += ' + dev, i)
+              return i, j
+          
+          
+          i, j = block(s)
+          blk = s[i:j]
+          kept = [ln for ln in blk.split('\n')
+                  if not re.match(r'\s*IMAGES \+= factory\.bin\s*$', ln)
+                  and not re.match(r'\s*IMAGE/factory\.bin\s*:=', ln)]
+          new = '\n'.join(kept)
+          if new != blk:
+              s = s[:i] + new + s[j:]
+              io.open(p, 'w', encoding='utf-8', newline='').write(s)
+              print('>>> 已从 %s 摘掉 factory 产物定义' % dev)
+          
+          i, j = block(s)
+          assert 'factory' not in s[i:j], dev + ' 仍残留 factory 产物定义'
+          print('✔ factory 已移除（多分区 U-Boot：只发 sysupgrade）')
+          PY
+          
+          # 3) 首启无线：生成/修正双频 AP（band 驱动，绝不写死 path/phy）
+          mkdir -p "$SRC/files/etc/uci-defaults"
+          cat > "$SRC/files/etc/uci-defaults/97-ruijie-wifi" <<'EOS'
+          #!/bin/sh
+          # Ruijie 首启无线：确保 /etc/config/wireless 存在、双频 AP 启用、SSID 按机型命名
+          SSID_BASE='@SSID@'
+          
+          i=0
+          while [ "$i" -lt 10 ]; do
+          	[ -n "$(ls -A /sys/class/ieee80211 2>/dev/null)" ] && break
+          	i=$((i + 1)); sleep 1
+          done
+          
+          [ -f /etc/config/wireless ] || wifi config >/dev/null 2>&1 || true
+          [ -f /etc/config/wireless ] || exit 0
+          
+          radios=$(uci -q show wireless | grep -c '=wifi-device$' || true)
+          [ "${radios:-0}" -gt 0 ] || exit 0
+          
+          uci -q show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p' | while read -r r; do
+          	[ -n "$r" ] || continue
+          	band=$(uci -q get "wireless.$r.band")
+          	if [ -z "$band" ]; then
+          		case "$(uci -q get "wireless.$r.hwmode")" in
+          			11a|11ac|11ax|11be) band=5g ;;
+          			*) band=2g ;;
+          		esac
+          	fi
+          	suffix=2.4G
+          	[ "$band" = "5g" ] && suffix=5G
+          	[ "$band" = "6g" ] && suffix=6G
+          
+          	uci -q set "wireless.$r.disabled=0"
+          	uci -q set "wireless.$r.country=CN"
+          	uci -q set "wireless.$r.ieee80211d=1"
+          	uci -q set "wireless.$r.cell_density=0"
+          	case "$band" in
+          	5g)
+          		uci -q set "wireless.$r.channel=36"
+          		uci -q set "wireless.$r.htmode=HE80"
+          		uci -q set "wireless.$r.ieee80211h=0"
+          		;;
+          	6g)
+          		uci -q set "wireless.$r.channel=auto"
+          		uci -q set "wireless.$r.htmode=HE160"
+          		;;
+          	*)
+          		uci -q set "wireless.$r.channel=auto"
+          		uci -q set "wireless.$r.htmode=HE40"
+          		;;
+          	esac
+          	uci -q commit wireless
+          
+          	if ! uci -q show wireless | grep -q "\.device='$r'"; then
+          		uci -q add wireless wifi-iface >/dev/null
+          		uci -q set "wireless.@wifi-iface[-1].device=$r"
+          		uci -q set "wireless.@wifi-iface[-1].network=lan"
+          		uci -q set "wireless.@wifi-iface[-1].mode=ap"
+          		uci -q set "wireless.@wifi-iface[-1].encryption=none"
+          		uci -q set "wireless.@wifi-iface[-1].disabled=0"
+          		uci -q commit wireless
+          	fi
+          
+          	idx=0
+          	while uci -q get "wireless.@wifi-iface[$idx]" >/dev/null 2>&1; do
+          		if [ "$(uci -q get "wireless.@wifi-iface[$idx].device")" = "$r" ]; then
+          			uci -q set "wireless.@wifi-iface[$idx].ssid=${SSID_BASE}-${suffix}"
+          			uci -q set "wireless.@wifi-iface[$idx].network=lan"
+          			uci -q set "wireless.@wifi-iface[$idx].disabled=0"
+          		fi
+          		idx=$((idx + 1))
+          	done
+          	uci -q commit wireless
+          done
+          
+          exit 0
+          EOS
+          sed -i "s/@SSID@/$SSID_BASE/" "$SRC/files/etc/uci-defaults/97-ruijie-wifi"
+          chmod 755 "$SRC/files/etc/uci-defaults/97-ruijie-wifi"
+          echo ">>> 首启无线脚本就绪：97-ruijie-wifi（SSID 前缀 $SSID_BASE）"
+          
+          # 5G 修复：升级保留配置时 97 号不再跑，单独放 98 号保证 5G 也修正
+          cat > "$SRC/files/etc/uci-defaults/98-ruijie-wifi-5g" <<'EOS'
+          #!/bin/sh
+          [ -f /etc/config/wireless ] || exit 0
+          for r in $(uci -q show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p'); do
+          	[ "$(uci -q get "wireless.$r.band")" = "5g" ] || continue
+          	uci -q set "wireless.$r.channel=36"
+          	uci -q set "wireless.$r.htmode=HE80"
+          	uci -q set "wireless.$r.ieee80211h=0"
+          	uci -q set "wireless.$r.disabled=0"
+          done
+          uci -q commit wireless
+          exit 0
+          EOS
+          chmod 755 "$SRC/files/etc/uci-defaults/98-ruijie-wifi-5g"
+          echo ">>> 5G 修正脚本就绪：98-ruijie-wifi-5g"
+          
+          # 4) 硬断言：网口映射 / 设备块 / DTS / 无线配置
+          NWO="$SRC/files/etc/board.d"
+          if ! grep -rqs "ucidef_set_interfaces_lan_wan \"$LAN_EXPECT\" \"$WAN_EXPECT\"" "$NWO"; then
+            echo "::error::网口映射与预期不符：期望 LAN=\"$LAN_EXPECT\" WAN=\"$WAN_EXPECT\""
+            grep -rn "ucidef_set_interfaces_lan_wan" "$NWO" || echo "（没有找到任何 lan_wan 配置）"
+            exit 1
+          fi
+          echo "✔ 网口映射: LAN=\"$LAN_EXPECT\" WAN=\"$WAN_EXPECT\""
+          
+          python3 - "$SRC" "$DEV" "$SLUG" <<'PY'
+          import io
+          import os
+          import re
+          import sys
+          
+          src, dev, slug = sys.argv[1], sys.argv[2], sys.argv[3]
+          start = 'define Device/' + dev + '\n'
+          mkp = os.path.join(src, 'target/linux/mediatek/image/filogic.mk')
+          mk = io.open(mkp, encoding='utf-8').read()
+          assert start in mk, 'filogic.mk 缺 ' + start.strip()
+          end = mk.index('TARGET_DEVICES += ' + dev, mk.index(start))
+          blk = mk[mk.index(start):end]
+          
+          if slug == 'be72pro':
+              need = ('kmod-mt7992-firmware', 'mt7988-wo-firmware')
+          else:
+              need = ('kmod-mt7915e',)
+              need += ('kmod-mt7981-firmware', 'mt7981-wo-firmware') if slug in ('x30epro', 'rgx30e') else ('kmod-mt7986-firmware', 'mt7986-wo-firmware')
+          for token in need:
+              assert token in blk, '%s 的 DEVICE_PACKAGES 缺 %s' % (dev, token)
+          print('✔ 设备块 WiFi 依赖:', ' '.join(need))
+          
+          dts = None
+          for line in blk.splitlines():
+              line = line.strip()
+              if line.startswith('DEVICE_DTS :='):
+                  dts = line.split(':=', 1)[1].strip()
+                  break
+          assert dts, dev + ' 没有 DEVICE_DTS'
+          dtsdir = os.path.join(src, 'target/linux/mediatek/dts')
+          path = os.path.join(dtsdir, dts + '.dts')
+          assert os.path.exists(path), 'DTS 未落地: ' + path
+          
+          text = ''
+          seen = set()
+          queue = [path]
+          while queue and len(seen) < 40:
+              cur = queue.pop(0)
+              if cur in seen or not os.path.exists(cur):
+                  continue
+              seen.add(cur)
+              body = io.open(cur, encoding='utf-8', errors='ignore').read()
+              text += body
+              for inc in re.findall(r'#include\s+["<]([^">]+)[">]', body):
+                  nxt = os.path.join(dtsdir, inc)
+                  if os.path.exists(nxt):
+                      queue.append(nxt)
+          
+          has_wifi = any(t in text for t in ('&wifi', 'wifi {', 'wifi@', 'mt7915', 'mt7992', 'mt7990'))
+          assert has_wifi, dts + ' 及包含的 dtsi 里没有 WiFi 节点'
+          assert ('eeprom' in text) or ('nvmem-cells' in text) or ('calibration' in text), dts + ' 没有 WiFi 校准(eeprom) 引用'
+          print('✔ DTS:', dts, '（含 WiFi 节点与校准，展开 %d 个文件）' % len(seen))
+          PY
+          
+          WIFI_SH="$SRC/files/etc/uci-defaults/97-ruijie-wifi"
+          [ -x "$WIFI_SH" ] || { echo "::error::97-ruijie-wifi 不存在或不可执行"; exit 1; }
+          grep -q 'htmode=HE80' "$WIFI_SH" || { echo "::error::无线脚本 5G 未使用 HE80"; exit 1; }
+          grep -q 'channel=36' "$WIFI_SH" || { echo "::error::无线脚本 5G 未固定 36 信道"; exit 1; }
+          FIX5G="$SRC/files/etc/uci-defaults/98-ruijie-wifi-5g"
+          [ -x "$FIX5G" ] || { echo "::error::缺少 98-ruijie-wifi-5g"; exit 1; }
+          grep -q 'htmode=HE80' "$FIX5G" || { echo "::error::98 号脚本未修正 htmode"; exit 1; }
+          grep -q 'country=CN' "$WIFI_SH" || { echo "::error::无线脚本缺 CN 国码"; exit 1; }
+          grep -q "SSID_BASE='$SSID_BASE'" "$WIFI_SH" || { echo "::error::无线脚本 SSID 前缀不对"; exit 1; }
+          echo "✔ 无线脚本断言通过"
+          
+          chmod 755 "$NWO"/* 2>/dev/null || true
+          echo "✔ $SLUG 注入完成：$DEV（网口 + 双频无线 + 无线增强预留）"
+          RUIJIE_INJECT_EOF
+          bash /tmp/ruijie-inject.sh
+
+      - name: 生成基础 .config
+        if: steps.pick.outputs.selected != 'false'
+        run: |
+          set -euo pipefail
+          cd openwrt
+          {
+            echo 'CONFIG_TARGET_mediatek=y'
+            echo 'CONFIG_TARGET_mediatek_filogic=y'
+            echo 'CONFIG_TARGET_MULTI_PROFILE=y'
+            echo 'CONFIG_TARGET_PER_DEVICE_ROOTFS=y'
+            echo 'CONFIG_DEVEL=y'
+            echo 'CONFIG_CCACHE=y'
+            cat ../devices-pack/"$SLUG"/config.fragment
+            # iStore 依赖：只写 luci-app-store 时，缺 TAR_XZ / lua 运行时 / taskd 会被 kconfig
+            # 整包丢掉（6.6 仓库的 customize.sh 就缺这一段，导致“iStore 市场未生效”）
+            for p in luci-app-store luci-lib-taskd luci-lib-xterm taskd \
+                     libuci-lua curl tar mount-utils xz-utils luci-compat luci-lua-runtime; do
+              echo "CONFIG_PACKAGE_${p}=y"
+            done
+          } > .config
+          echo "---- 基础配置 ----"
+          cat .config
+
+      - name: 主题 / iStore / 中文 / 首页（仓库统一脚本）
+        if: steps.pick.outputs.selected != 'false'
+        run: bash scripts/customize.sh openwrt
+
+      - name: 收敛到单一机型 + 校验（主题 / 商店 / 中文 / WiFi）
+        if: steps.pick.outputs.selected != 'false'
+        run: |
+          set -euo pipefail
+          cd openwrt
+          DEV=$(sed -n 's/^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_\(.*\)=y$/\1/p' ../devices-pack/"$SLUG"/config.fragment | head -1 | tr -d '\r')
+          echo ">>> 目标机型：$DEV"
+
+          echo 'CONFIG_IMAGEOPT=y' >> .config
+          echo 'CONFIG_VERSIONOPT=y' >> .config
+          make defconfig
+
+          # 只保留本机型：MULTI_PROFILE 下 defconfig 会把同 subtarget 的所有机型一起打开
+          python3 - "$DEV" <<'PY'
+          import sys
+          keep = 'CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_' + sys.argv[1]
+          off, out = [], []
+          for line in open('.config', encoding='utf-8', errors='surrogateescape'):
+              name = line.split('=')[0].replace('# ', '').split(' ')[0]
+              if name.startswith('CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_') and name != keep:
+                  off.append(name)
+                  continue
+              out.append(line)
+          for n in dict.fromkeys(off):
+              out.append('# %s is not set\n' % n)
+          out.append('%s=y\n' % keep)
+          open('.config', 'w', encoding='utf-8', errors='surrogateescape').writelines(out)
+          print('已关闭非目标机型：%d 个' % len(off))
+          PY
+          echo "CONFIG_TARGET_MULTI_PROFILE=y" >> .config
+          make defconfig
+
+          # 发行名以仓库为准：image-config.in 的默认值决定 /etc/openwrt_release 与产物名，
+          # 只改 .config 会被下一次 defconfig 重置。
+          if [ -f package/base-files/image-config.in ]; then
+            sed -i "s/^\(\s*\)default \"OpenWrt\"$/\1default \"$DIST\"/" package/base-files/image-config.in
+          fi
+          sed -i '/^CONFIG_VERSION_DIST=/d' .config
+          echo "CONFIG_VERSION_DIST=\"$DIST\"" >> .config
+
+          # 关闭 BTF（规避 tools/dwarves 构建失败）
+          if grep -q '^CONFIG_KERNEL_DEBUG_INFO_BTF=y$' .config; then
+            sed -i 's/^CONFIG_KERNEL_DEBUG_INFO_BTF=y/# CONFIG_KERNEL_DEBUG_INFO_BTF is not set/' .config
+          fi
+          make defconfig
+          sed -i '/^CONFIG_VERSION_DIST=/d' .config
+          echo "CONFIG_VERSION_DIST=\"$DIST\"" >> .config
+
+          echo "===== 校验 ====="
+          grep -q '^CONFIG_TARGET_mediatek=y$' .config || { echo "::error::target 未选中"; exit 1; }
+          grep -q '^CONFIG_TARGET_mediatek_filogic=y$' .config || { echo "::error::subtarget 未选中"; exit 1; }
+          grep -q "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${DEV}=y$" .config \
+            || { echo "::error::机型 ${DEV} 未生效"; exit 1; }
+          n_dev=$(grep -cE '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config || true)
+          [ "${n_dev:-0}" -eq 1 ] || { echo "::error::启用机型应为 1，实际 ${n_dev}"; exit 1; }
+          grep -q "^CONFIG_VERSION_DIST=\"$DIST\"$" .config || { echo "::error::发行名 $DIST 未生效"; exit 1; }
+
+          grep -q "^CONFIG_PACKAGE_luci-theme-${THEME}=y$" .config || { echo "::error::主题 ${THEME} 未生效"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_luci-app-store=y$' .config || { echo "::error::iStore 市场未生效"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_luci-i18n-base-zh-cn=y$' .config || { echo "::error::中文基础包未生效"; exit 1; }
+          grep -q '^CONFIG_LUCI_LANG_zh_Hans=y$' .config || { echo "::error::中文开关未开启"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_luci=y$' .config || { echo "::error::LuCI 主集合未选中"; exit 1; }
+          if ! grep -q '^CONFIG_PACKAGE_uhttpd=y$' .config; then
+            echo "::warning::uhttpd 未选中，补写 luci/uhttpd 后重建配置"
+            grep -nE '^#? ?CONFIG_PACKAGE_(luci|luci-light|uhttpd)=' .config | head -10 || true
+            printf 'CONFIG_PACKAGE_luci=y\nCONFIG_PACKAGE_uhttpd=y\n' >> .config
+            make defconfig
+          fi
+          grep -q '^CONFIG_PACKAGE_uhttpd=y$' .config || { echo "::error::uhttpd 未选中"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_dropbear=y$' .config || { echo "::error::dropbear 未选中，SSH 不可用"; exit 1; }
+          grep -qE '^CONFIG_PACKAGE_(wpad-basic-mbedtls|wpad-openssl|wpad-mbedtls|wpad)=y$' .config \
+            || { echo "::error::wpad 未选中，无线无法起 AP"; exit 1; }
+          # 首页：标准 LuCI（状态-概览），不引入 quickstart（XHR 失败会白屏且丢侧边栏）
+          if grep -q '^CONFIG_PACKAGE_luci-app-quickstart=y$' .config; then
+            echo "::error::本仓库首页应为标准 LuCI，不应引入 quickstart"; exit 1
+          fi
+
+          # WiFi 驱动/固件：MULTI_PROFILE + PER_DEVICE_ROOTFS 下 DEVICE_PACKAGES 是在镜像阶段
+          # 装进 per-device rootfs 的，不一定出现在 .config（lede run 的 “kmod-mt7915e 未生效”
+          # 就是误判）。这里只做提示，真正的硬校验放在产物 manifest 上。
+          if [ "$SLUG" = "be72pro" ]; then
+            WIFI_PKGS="kmod-mt7992-firmware kmod-mt7992-23-firmware mt7988-wo-firmware"
+          elif [ "$SLUG" = "x30epro" ] || [ "$SLUG" = "rgx30e" ]; then
+            WIFI_PKGS="kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware"
+          else
+            WIFI_PKGS="kmod-mt7915e kmod-mt7986-firmware mt7986-wo-firmware"
+          fi
+          for k in $WIFI_PKGS; do
+            if grep -q "^CONFIG_PACKAGE_${k}=y$" .config; then
+              echo "  [ok] .config 选中 $k"
+            else
+              echo "  [info] $k 未出现在 .config（预期由 DEVICE_PACKAGES 在镜像阶段安装，稍后用 manifest 校验）"
+            fi
+          done
+          # 后续「收集产物」步骤要用同一份清单做 manifest 校验
+          echo "WIFI_PKGS=$WIFI_PKGS" >> "$GITHUB_ENV"
+
+          # 无线配置与增强脚本
+          test -x files/etc/uci-defaults/97-ruijie-wifi || { echo "::error::缺 97-ruijie-wifi"; exit 1; }
+          grep -q 'htmode=HE80' files/etc/uci-defaults/97-ruijie-wifi || { echo "::error::无线脚本 5G 未用 HE80（CN 下 HE160 起不来）"; exit 1; }
+          grep -q 'channel=36' files/etc/uci-defaults/97-ruijie-wifi || { echo "::error::无线脚本 5G 未固定 36 信道"; exit 1; }
+          test -x files/etc/uci-defaults/98-ruijie-wifi-5g || { echo "::error::缺 98-ruijie-wifi-5g（升级保留配置时 5G 不会被修正）"; exit 1; }
+          if [ -f files/etc/uci-defaults/99-wifi-boost ]; then
+            grep -q "country='CN'" files/etc/uci-defaults/99-wifi-boost || { echo "::error::99-wifi-boost 缺 CN 国码"; exit 1; }
+            grep -q 'HE80' files/etc/uci-defaults/99-wifi-boost || { echo "::error::99-wifi-boost 5G 未用 HE80"; exit 1; }
+          else
+            echo "::warning::本仓库 customize.sh 未生成 99-wifi-boost（97-ruijie-wifi 已覆盖基础增强）"
+          fi
+          echo "机型 $DEV / 主题 $THEME / iStore + 中文 / 双频无线首启启用"
+
+      - name: 下载源码包
+        if: steps.pick.outputs.selected != 'false'
+        run: |
+          cd openwrt
+          for i in 1 2 3; do
+            if make -j8 download < /dev/null; then
+              echo ">>> 下载完成"
+              break
+            fi
+            echo ">>> 第 $i 次下载有失败项，重试"
+            sleep 15
+          done
+          make -j1 download < /dev/null 2>&1 | tail -20 || true
+
+      - name: 编译固件
+        if: steps.pick.outputs.selected != 'false'
+        run: |
+          cd openwrt
+          export CCACHE_DIR CCACHE_MAXSIZE CCACHE_COMPRESS CCACHE_NOHASHDIR
+          mkdir -p "$CCACHE_DIR"
+          ccache -s 2>/dev/null || true
+          set -o pipefail
+          if make -j"$(nproc)" 2>&1 | tee build.log; then
+            echo ">>> ✅ 编译成功"
+          else
+            echo "::warning::并行编译失败，单线程复现真实错误"
+            fail="$(grep -o 'ERROR: [^ ]* failed to build' build.log | head -1 | awk '{print $2}')"
+            echo "== 失败包: ${fail:-未识别}"
+            if [ -n "$fail" ]; then
+              make -j1 V=s "$fail/compile" 2>&1 | tail -150 || true
+            else
+              make -j1 V=s 2>&1 | tail -150 || true
+            fi
+            exit 1
+          fi
+          ccache -s 2>/dev/null || true
+
+      - name: 上传编译日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.slug }}
+          path: |
+            openwrt/build.log
+            openwrt/.config
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: 收集本机型产物
+        if: steps.pick.outputs.selected != 'false' && success()
+        run: |
+          set -euo pipefail
+          DEV=$(sed -n 's/^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_\(.*\)=y$/\1/p' devices-pack/"$SLUG"/config.fragment | head -1 | tr -d '\r')
+          B=openwrt/bin/targets/mediatek/filogic
+          mkdir -p out
+          shopt -s nullglob
+          for f in "$B"/*"$DEV"*; do
+            case "$f" in
+              *.json|*.buildinfo|*.manifest|*sysupgrade*) cp -f "$f" out/ ;;
+            esac
+          done
+          # 产物名统一以仓库名开头：VERSION_DIST 会被 defconfig 吃掉，这里兜底改名
+          for f in out/*; do
+            [ -e "$f" ] || continue
+            b=$(basename "$f")
+            case "$b" in
+              "$PREFIX"-*) : ;;
+              openwrt-*) mv -f "$f" "out/${PREFIX}-${b#openwrt-}" ;;
+              mediatek-*) mv -f "$f" "out/${PREFIX}-${b}" ;;
+            esac
+          done
+          # 同一镜像可能同时存在 openwrt- 前缀与发行版前缀两份，只留发行版那份
+          for f in out/*; do
+            [ -e "$f" ] || continue
+            b=$(basename "$f")
+            case "$b" in
+              openwrt-*)
+                base=${b#openwrt-}
+                if [ -e "out/${PREFIX}-$base" ]; then rm -f "$f"; fi
+                ;;
+            esac
+          done
+
+          sysup=( out/*"$DEV"*sysupgrade* )
+          [ "${#sysup[@]}" -ge 1 ] || { echo "::error::$DEV 缺 sysupgrade 产物"; ls -lh "$B" out || true; exit 1; }
+          # 这 5 台都是多分区 U-Boot，只发 sysupgrade，出现 factory 一律失败
+          if ls out | grep -qi factory; then
+            echo "::error::多分区 U-Boot 机型不应有 factory 产物"; ls out; exit 1
+          fi
+          if ls out/ | grep -qiE 'preloader|bl31|\.fip$|gpt|recovery'; then
+            echo "::error::产物里出现引导工件，拒绝发布"; ls out; exit 1
+          fi
+          ls out | grep -q "^${PREFIX}-" || { echo "::error::产物名不是 ${PREFIX}- 前缀"; ls out; exit 1; }
+
+          # 用镜像 manifest 做端到端校验：无线驱动、主题、iStore、中文必须在最终 rootfs 里
+          MAN=$(ls out/*.manifest 2>/dev/null | head -1)
+          [ -n "$MAN" ] || { echo "::error::缺 manifest，无法校验包清单"; ls out; exit 1; }
+          echo "===== 包清单校验（$MAN）====="
+          miss=0
+          for k in $WIFI_PKGS luci-app-store "luci-theme-${THEME}" luci-i18n-base-zh-cn; do
+            if grep -q "^${k} " "$MAN"; then
+              echo "  [ok] $k"
+            else
+              echo "  [FAIL] 镜像清单缺 $k"; miss=$((miss + 1))
+            fi
+          done
+          # wpad 变体随仓库不同，只要有一个 hostapd 套件就行
+          if grep -qE '^(wpad-basic-mbedtls|wpad-openssl|wpad-mbedtls|wpad) ' "$MAN"; then
+            echo "  [ok] wpad"
+          else
+            echo "  [FAIL] 镜像清单缺 wpad（无线起不了 AP）"; miss=$((miss + 1))
+          fi
+          if [ "$miss" -ne 0 ]; then
+            echo "::error::镜像包清单校验失败 $miss 项（见上方 [FAIL]）"; exit 1
+          fi
+          ( cd out && sha256sum ./* > sha256sums.txt ) 2>/dev/null || true
+          echo "===== ${{ matrix.title }} ====="
+          ls -lh out
+          {
+            echo "## 🏗️ ${{ matrix.title }} 编译完成"
+            echo ""
+            echo "| 文件 | 大小 |"
+            echo "|---|---|"
+            ls -lh out | tail -n +2 | awk '{printf "| %s | %s |\n", $9, $5}'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传本机型产物
+        if: steps.pick.outputs.selected != 'false' && success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-${{ matrix.slug }}
+          path: out/
+          retention-days: 14
+          if-no-files-found: error
+
+  release:
+    name: 📦 发布 kwrt-25.12-日期
+    needs: build
+    if: ${{ always() && needs.build.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.make_release) }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 下载全部机型产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: images-*
+          path: rel
+          merge-multiple: true
+
+      - name: 生成校验文件
+        run: |
+          cd rel
+          ls -lh
+          sha256sum ./* > sha256sums.txt
+
+      - name: 创建 Release（kwrt-<大版本>-<北京日期>）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          DATE=$(TZ=Asia/Shanghai date +%Y%m%d)
+          TAG="${PREFIX}-${VERSION}-${DATE}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            TAG="${TAG}-r${GITHUB_RUN_NUMBER}"
+          fi
+          cat > notes.md <<'EOF'
+          Kwrt 25.12 · 锐捷 5 机型自动编译（tvliving/Kwrt）
+
+          | 机型 | 平台 | 网口 |
+          |---|---|---|
+          | EW-6000GX PRO | MT7986A | lan1-4 + eth1（2.5G Airoha EN8811H）作 WAN |
+          | RG-X60 New | MT7986A | lan1-3 + eth1 作 WAN |
+          | RG-X30E Pro | MT7981B | wan + lan1-3 |
+          | RG-X30E | MT7981B | wan + lan1-3 |
+          | RG-BE72 Pro | MT7988D | lan1-4 + eth1/eth2.2 作 LAN，eth2.1 作 WAN |
+
+          共同项：
+          - 产物：每台仅 squashfs sysupgrade；不含 factory / preloader / fip / gpt（均为多分区 U-Boot）
+          - 文件名统一 `kwrt-...`，不再产出 openwrt-* 副本
+          - 界面：vantage 主题 + iStore 市场 + 全量简体中文 + 强制 zh_cn + 标准 LuCI 首页（状态-概览）
+          - 无线：首启 97-ruijie-wifi 生成双频 AP（CN / 5G HE80@ch36 / 2.4G HE40），
+            随后 99-wifi-boost 做 802.11k/v/r + beamformee 增强
+          - 默认 IP: 192.168.1.1 / root / 无密码（刷完请立即改）
+          - 定时：每周一 08:30（北京时间）
+          - 构建记录: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ### 注意
+
+          1. 5 台都是多分区 U-Boot，只提供 sysupgrade 包；首次刷入前请备份原厂分区，
+             BE72 Pro 需先刷对应 U-Boot mod 布局。
+          2. EW-6000GX PRO / X60 New 的 2.5G WAN 走 gmac1(eth1)，LAN 走 MT7531。
+          3. 无线默认开放，刷入后请立即设置密码。
+          EOF
+          for i in 1 2 3 4 5; do
+            echo ">>> 第 $i 次上传"
+            if ! gh release view "$TAG" >/dev/null 2>&1; then
+              gh release create "$TAG" --title "Kwrt 25.12 · 锐捷 5 机型 · ${DATE}" --notes-file notes.md || true
+            fi
+            if gh release upload "$TAG" rel/* --clobber; then
+              echo ">>> 上传成功（第 $i 次）"
+              exit 0
+            fi
+            echo ">>> 第 $i 次失败，$((i * 30)) 秒后重试"
+            sleep $((i * 30))
+          done
+          echo "::error::Release 上传失败，产物已保留在 Actions artifacts"
+          exit 1
