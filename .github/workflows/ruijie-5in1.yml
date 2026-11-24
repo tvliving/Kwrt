@@ -89,8 +89,19 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 释放磁盘空间并加大 swap
+      - name: 当前仓库是否具备该机型设备包
+        id: packcheck
         if: steps.pick.outputs.selected != 'false'
+        run: |
+          if [ ! -f "devices-pack/$SLUG/config.fragment" ]; then
+            echo "::warning::当前仓库未提供 $SLUG 设备包，跳过该机型（不影响其它机型）"
+            echo "selected=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "selected=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 释放磁盘空间并加大 swap
+        if: steps.pick.outputs.selected != 'false' && steps.packcheck.outputs.selected != 'false'
         run: |
           echo "===== 释放前 ====="
           df -h / | tail -1
@@ -122,7 +133,7 @@ jobs:
           free -h
 
       - name: 安装编译依赖
-        if: steps.pick.outputs.selected != 'false'
+        if: steps.pick.outputs.selected != 'false' && steps.packcheck.outputs.selected != 'false'
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -151,7 +162,7 @@ jobs:
           ccache --version | head -1 || echo "::warning::ccache 不可用"
 
       - name: 准备源码树（上游 openwrt-25.12）
-        if: steps.pick.outputs.selected != 'false'
+        if: steps.pick.outputs.selected != 'false' && steps.packcheck.outputs.selected != 'false'
         run: |
           rm -rf openwrt .owrt-src
           for i in 1 2 3; do
@@ -165,7 +176,7 @@ jobs:
           echo ">>> 源码树就绪：$(cd openwrt && git rev-parse --short HEAD)"
 
       - name: 修补上游 libsepol / libselinux 3.9 的 InstallDev（公共头与 .pc）
-        if: steps.pick.outputs.selected != 'false'
+        if: steps.pick.outputs.selected != 'false' && steps.packcheck.outputs.selected != 'false'
         run: |
           set -euo pipefail
           cd openwrt
@@ -248,7 +259,7 @@ jobs:
             || { echo "::error::mtd-utils --without-selinux 补丁未生效"; exit 1; }
 
       - name: 恢复 ccache
-        if: steps.pick.outputs.selected != 'false'
+        if: steps.pick.outputs.selected != 'false' && steps.packcheck.outputs.selected != 'false'
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
@@ -258,7 +269,7 @@ jobs:
             ccache-ruijie5-
 
       - name: 注入设备包（网口 / 无线 / DTS 硬断言）
-        if: steps.pick.outputs.selected != 'false'
+        if: steps.pick.outputs.selected != 'false' && steps.packcheck.outputs.selected != 'false'
         env:
           SLUG: ${{ matrix.slug }}
           SOURCE_ROOT: openwrt
@@ -525,7 +536,7 @@ jobs:
           bash /tmp/ruijie-inject.sh
 
       - name: 生成基础 .config
-        if: steps.pick.outputs.selected != 'false'
+        if: steps.pick.outputs.selected != 'false' && steps.packcheck.outputs.selected != 'false'
         run: |
           set -euo pipefail
           cd openwrt
@@ -548,11 +559,23 @@ jobs:
           cat .config
 
       - name: 主题 / iStore / 中文 / 首页（仓库统一脚本）
-        if: steps.pick.outputs.selected != 'false'
-        run: bash scripts/customize.sh openwrt
+        if: steps.pick.outputs.selected != 'false' && steps.packcheck.outputs.selected != 'false'
+        run: |
+          # 部分仓库的 customize.sh 是 CRLF 行尾，直接 bash 执行会报 $'\r': command not found
+          sed -i 's/\r$//' scripts/customize.sh
+          bash scripts/customize.sh openwrt
+
+      - name: 统一 99-wifi-boost 为 HE80（CN 下 HE160 不稳）
+        if: steps.pick.outputs.selected != 'false' && steps.packcheck.outputs.selected != 'false'
+        run: |
+          F=openwrt/files/etc/uci-defaults/99-wifi-boost
+          [ -f "$F" ] || { echo "::warning::未生成 99-wifi-boost，跳过归一化"; exit 0; }
+          sed -i -e 's/HE160/HE80/g' -e 's/160MHz/80MHz/g' "$F"
+          grep -q 'HE80' "$F" || { echo "::error::99-wifi-boost 归一化后仍无 HE80"; exit 1; }
+          echo ">>> 99-wifi-boost 已统一为 HE80"
 
       - name: 收敛到单一机型 + 校验（主题 / 商店 / 中文 / WiFi）
-        if: steps.pick.outputs.selected != 'false'
+        if: steps.pick.outputs.selected != 'false' && steps.packcheck.outputs.selected != 'false'
         run: |
           set -euo pipefail
           cd openwrt
@@ -662,7 +685,7 @@ jobs:
           echo "机型 $DEV / 主题 $THEME / iStore + 中文 / 双频无线首启启用"
 
       - name: 下载源码包
-        if: steps.pick.outputs.selected != 'false'
+        if: steps.pick.outputs.selected != 'false' && steps.packcheck.outputs.selected != 'false'
         run: |
           cd openwrt
           for i in 1 2 3; do
@@ -676,7 +699,7 @@ jobs:
           make -j1 download < /dev/null 2>&1 | tail -20 || true
 
       - name: 编译固件
-        if: steps.pick.outputs.selected != 'false'
+        if: steps.pick.outputs.selected != 'false' && steps.packcheck.outputs.selected != 'false'
         run: |
           cd openwrt
           export CCACHE_DIR CCACHE_MAXSIZE CCACHE_COMPRESS CCACHE_NOHASHDIR
@@ -711,7 +734,7 @@ jobs:
           if-no-files-found: warn
 
       - name: 收集本机型产物
-        if: steps.pick.outputs.selected != 'false' && success()
+        if: steps.pick.outputs.selected != 'false' && steps.packcheck.outputs.selected != 'false' && success()
         run: |
           set -euo pipefail
           DEV=$(sed -n 's/^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_\(.*\)=y$/\1/p' devices-pack/"$SLUG"/config.fragment | head -1 | tr -d '\r')
@@ -757,18 +780,8 @@ jobs:
           ls out | grep -q "^${PREFIX}-" || { echo "::error::产物名不是 ${PREFIX}- 前缀"; ls out; exit 1; }
 
           # 用镜像 manifest 做端到端校验：无线驱动、主题、iStore、中文必须在最终 rootfs 里
-          # sysupgrade-tar 机型通常不生成 .manifest，缺省时从镜像内 CONTROL 取包清单
-          MAN=$(ls out/*"$DEV"*.manifest 2>/dev/null | head -1)
-          if [ -z "$MAN" ]; then
-            IMG=$(ls out/*"$DEV"*sysupgrade* 2>/dev/null | head -1)
-            if [ -n "$IMG" ]; then
-              TMPD=$(mktemp -d)
-              tar -xf "$IMG" -C "$TMPD" 2>/dev/null || true
-              MAN=$(ls "$TMPD"/*/CONTROL 2>/dev/null | head -1)
-              [ -n "$MAN" ] && echo "[info] 无 .manifest，改用镜像内 CONTROL 校验：$MAN"
-            fi
-          fi
-          [ -n "$MAN" ] || { echo "::error::缺 manifest 且镜像内无 CONTROL，无法校验包清单"; ls -lh out; exit 1; }
+          MAN=$(ls out/*.manifest 2>/dev/null | head -1)
+          [ -n "$MAN" ] || { echo "::error::缺 manifest，无法校验包清单"; ls out; exit 1; }
           echo "===== 包清单校验（$MAN）====="
           miss=0
           for k in $WIFI_PKGS luci-app-store "luci-theme-${THEME}" luci-i18n-base-zh-cn; do
@@ -799,7 +812,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 上传本机型产物
-        if: steps.pick.outputs.selected != 'false' && success()
+        if: steps.pick.outputs.selected != 'false' && steps.packcheck.outputs.selected != 'false' && success()
         uses: actions/upload-artifact@v4
         with:
           name: images-${{ matrix.slug }}
