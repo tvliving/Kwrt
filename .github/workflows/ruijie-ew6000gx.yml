@@ -849,13 +849,26 @@ jobs:
           path: rel
           merge-multiple: true
 
+      - name: 检查产物是否为空
+        id: check
+        run: |
+          if [ ! -d rel ] || [ -z "$(ls -A rel 2>/dev/null)" ]; then
+            echo "::warning::没有构建产物（本仓库可能未提供该机型 devices-pack），跳过发布"
+            echo "empty=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "empty=false" >> "$GITHUB_OUTPUT"
+            ls -lh rel
+          fi
+
       - name: 生成校验文件
+        if: steps.check.outputs.empty != 'true'
         run: |
           cd rel
           ls -lh
           sha256sum ./* > sha256sums.txt
 
       - name: 创建 Release（kwrt-<大版本>-<北京日期>-ew6000gx）
+        if: steps.check.outputs.empty != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
