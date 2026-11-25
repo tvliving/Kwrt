@@ -835,7 +835,8 @@ jobs:
 
           # 端到端包清单：无线驱动 / 主题 / 市场 / 中文 必须真的在 rootfs 里
           PKGS=$(mktemp)
-          MANIFEST=$(ls "$B"/*sl_3000-emmc*.manifest 2>/dev/null | head -1 || true)
+          MANIFEST=""
+          for _m in "$B"/*.manifest; do [ -f "$_m" ] && { MANIFEST="$_m"; break; }; done
           if [ -n "$MANIFEST" ]; then
             awk '{print $1}' "$MANIFEST" | grep -v '^$' > "$PKGS" || true
             echo "[info] 用 manifest 校验：$MANIFEST"

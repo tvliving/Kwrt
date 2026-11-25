@@ -296,6 +296,27 @@ jobs:
         run: |
           set -euo pipefail
           cd openwrt
+          python3 - <<'PY'
+          import io
+          import os
+          # libcryptopp（feeds/packages）：上游 install 把 .so 装到 usr/local/lib，
+          # Package/install 也按 usr/local/lib 拷，交叉环境该目录可能为空 →
+          # cp cannot stat libcryptopp.so*（6.6 仓库 rax3000me 即此）。
+          # 这里直接定义 Build/Install，从构建目录取产物。
+          p = 'package/feeds/packages/libs/libcryptopp/Makefile'
+          if os.path.exists(p):
+              s = io.open(p, encoding='utf-8').read()
+              if 'define Build/Install\n' not in s:
+                  s += ('\ndefine Build/Install\n'
+                        '\t$(INSTALL_DIR) $(PKG_INSTALL_DIR)/usr/local/lib $(PKG_INSTALL_DIR)/usr/local/lib/pkgconfig $(PKG_INSTALL_DIR)/usr/local/include/cryptopp\n'
+                        '\t-$(CP) $(PKG_BUILD_DIR)/libcryptopp.so* $(PKG_INSTALL_DIR)/usr/local/lib/\n'
+                        '\t-$(CP) $(PKG_BUILD_DIR)/libcryptopp.a $(PKG_INSTALL_DIR)/usr/local/lib/\n'
+                        '\t-$(CP) $(PKG_BUILD_DIR)/libcryptopp.pc $(PKG_INSTALL_DIR)/usr/local/lib/pkgconfig/\n'
+                        '\t-$(CP) $(PKG_BUILD_DIR)/*.h $(PKG_INSTALL_DIR)/usr/local/include/cryptopp/\n'
+                        'endef\n')
+                  io.open(p, 'w', encoding='utf-8').write(s)
+                  print('>>> libcryptopp: Build/Install 自建拷贝')
+          PY
           echo 'CONFIG_IMAGEOPT=y' >> .config
           echo 'CONFIG_VERSIONOPT=y' >> .config
           make defconfig
@@ -483,6 +504,7 @@ jobs:
             [ -e "$f" ] || continue
             b=$(basename "$f")
             case "$b" in
+              *cmcc_rax3000me*) : ;;  # 已是 ME，跳过（cmcc_rax3000m 是它的前缀）
               *cmcc_rax3000m*) mv -f "$f" "out/${b//cmcc_rax3000m/cmcc_rax3000me}" ;;
             esac
           done
