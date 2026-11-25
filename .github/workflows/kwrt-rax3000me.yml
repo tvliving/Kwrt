@@ -131,6 +131,8 @@ jobs:
           cd openwrt
           python3 - <<'PY'
           import io
+          import os
+          import re
 
           # ImmortalWrt 25.12 的 libsepol / libselinux 都是 3.9，InstallDev 统一从
           # $(PKG_INSTALL_DIR)/usr/include/* 与 usr/lib/pkgconfig/<name>.pc 取文件。
@@ -197,6 +199,42 @@ jobs:
               s = s.replace(anchor, anchor + '\n' + line, 1)
               io.open(p, 'w', encoding='utf-8').write(s)
               print('>>> mtd-utils: --without-selinux (libselinux.pc auto-probe)')
+          # libbpf 1.6.2：Build/Install 必须定义在 include package.mk **之后**（package.mk 里是
+          # `Build/Install=$(if $(PKG_INSTALL),$(call Build/Install/Default,))` 无条件赋值）。
+          # 但实测它的 `make install` 在交叉环境下可能一个文件都不落地（ipkg-install 全空，
+          # 连 usr/include/bpf/*.h 都没有，InstallDev 直接 cp cannot stat）。
+          # 因此这里不再依赖上游 install 目标：先 make all，再自己把产物拷进 PKG_INSTALL_DIR。
+          p = 'package/libs/libbpf/Makefile'
+          if os.path.exists(p):
+              s = io.open(p, encoding='utf-8').read()
+              block = (
+                  'define Build/Install\n'
+                  '\t+$(MAKE) $(PKG_JOBS) -C $(PKG_BUILD_DIR)/$(MAKE_PATH) $(TARGET_CONFIGURE_OPTS) $(MAKE_FLAGS) all\n'
+                  '\t$(INSTALL_DIR) $(PKG_INSTALL_DIR)/usr/lib $(PKG_INSTALL_DIR)/usr/include/bpf $(PKG_INSTALL_DIR)/usr/lib/pkgconfig\n'
+                  '\t-$(CP) $(PKG_BUILD_DIR)/$(MAKE_PATH)/libbpf.so* $(PKG_INSTALL_DIR)/usr/lib/\n'
+                  '\t-$(CP) $(PKG_BUILD_DIR)/$(MAKE_PATH)/libbpf.a $(PKG_INSTALL_DIR)/usr/lib/\n'
+                  '\t-$(CP) $(PKG_BUILD_DIR)/$(MAKE_PATH)/*.h $(PKG_INSTALL_DIR)/usr/include/bpf/\n'
+                  '\t-$(CP) $(PKG_BUILD_DIR)/$(MAKE_PATH)/libbpf.pc $(PKG_INSTALL_DIR)/usr/lib/pkgconfig/\n'
+                  '\t@ls $(PKG_INSTALL_DIR)/usr/lib/libbpf.so* >/dev/null 2>&1 || { \\\n'
+                  '\t\techo "ERROR: libbpf 没编出 .so，构建目录内容如下："; \\\n'
+                  '\t\tls -la $(PKG_BUILD_DIR)/$(MAKE_PATH) | head -30; exit 1; }\n'
+                  'endef\n')
+              anchor = 'include $(INCLUDE_DIR)/nls.mk\n'
+              if 'define Build/Install\n' in s:
+                  s = re.sub(r'define Build/Install\n(?:\t.*\n)+endef\n', '', s, count=1)
+              if anchor in s:
+                  s = s.replace(anchor, anchor + '\n' + block, 1)
+              # InstallDev 也从构建目录兜底（上游从 ipkg-install 拷，空目录必炸）
+              s = s.replace(
+                  '\t$(CP) $(PKG_INSTALL_DIR)/usr/include/bpf/*.h $(1)/usr/include/bpf/',
+                  '\t$(CP) $(PKG_INSTALL_DIR)/usr/include/bpf/*.h $(1)/usr/include/bpf/ 2>/dev/null \\\n'
+                  '\t\t|| $(CP) $(PKG_BUILD_DIR)/$(MAKE_PATH)/*.h $(1)/usr/include/bpf/')
+              s = s.replace(
+                  '\t$(CP) $(PKG_INSTALL_DIR)/usr/lib/libbpf.{a,so*} \\\n\t\t$(1)/usr/lib/',
+                  '\t$(CP) $(PKG_INSTALL_DIR)/usr/lib/libbpf.{a,so*} \\\n\t\t$(1)/usr/lib/ 2>/dev/null \\\n'
+                  '\t\t|| $(CP) $(PKG_BUILD_DIR)/$(MAKE_PATH)/libbpf.{a,so*} $(1)/usr/lib/')
+              io.open(p, 'w', encoding='utf-8').write(s)
+              print('>>> libbpf: 自建 Build/Install（不依赖上游 install）+ InstallDev 兜底')
           if a != 2 or b != 2:
               raise SystemExit('::error::libsepol/libselinux InstallDev patch incomplete')
           PY

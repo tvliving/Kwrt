@@ -122,6 +122,126 @@ jobs:
           # DTS include 的基础 dtsi 必须在（不同小版本文件名可能不同，这里给兜底提示）
           ls target/linux/mediatek/dts/mt7981*.dtsi | head -5 || true
 
+      - name: 修补上游 libsepol / libselinux 3.5 的 InstallDev（公共头与 .pc）
+        run: |
+          set -euo pipefail
+          cd openwrt
+          python3 - <<'PY'
+          import io
+          import os
+          import re
+
+          # ImmortalWrt 24.10 的 libsepol / libselinux 都是 3.5，InstallDev 统一从
+          # $(PKG_INSTALL_DIR)/usr/include/* 与 usr/lib/pkgconfig/<name>.pc 取文件。
+          # 但 3.10 的 make install 并不稳定地把公共头落地：
+          #   libsepol 公共头在 include/sepol（src/*.h 全是私有头，没有 sepol.h）
+          #   libselinux 公共头在 include/selinux
+          #   .pc 由 make all 生成在 src/<name>.pc
+          # 只修 libsepol 会先报 sepol/sepol.h: No such file or directory，
+          # 修完后 libselinux 的 InstallDev 又以同样方式失败。两个包一起修：
+          # 原 ipkg-install 拷贝保留但吞掉缺失错误，再无条件从构建目录补全套公共头/.pc。
+          def fix(path, name, hdr):
+              s = io.open(path, encoding='utf-8').read()
+              old_hdr = '\t$(CP) $(PKG_INSTALL_DIR)/usr/include/* $(1)/usr/include/'
+              new_hdr = ('\t$(CP) $(PKG_INSTALL_DIR)/usr/include/* $(1)/usr/include/ 2>/dev/null || true\n'
+                         '\t$(CP) $(PKG_BUILD_DIR)/%s $(1)/usr/include/' % hdr)
+              old_pc = ('\t$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/lib/pkgconfig/%s.pc '
+                        '$(1)/usr/lib/pkgconfig/') % name
+              new_pc = ('\t$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/lib/pkgconfig/%s.pc '
+                        '$(1)/usr/lib/pkgconfig/ 2>/dev/null || true\n'
+                        '\t$(INSTALL_DATA) $(PKG_BUILD_DIR)/src/%s.pc '
+                        '$(1)/usr/lib/pkgconfig/') % (name, name)
+              n = 0
+              if old_hdr in s:
+                  s = s.replace(old_hdr, new_hdr, 1)
+                  n += 1
+              if old_pc in s:
+                  s = s.replace(old_pc, new_pc, 1)
+                  n += 1
+              io.open(path, 'w', encoding='utf-8').write(s)
+              print('>>> %s: patched %d places (headers + .pc)' % (name, n))
+              return n
+
+          a = fix('package/libs/libsepol/Makefile', 'libsepol', 'include/sepol')
+          b = fix('package/libs/libselinux/Makefile', 'libselinux', 'include/selinux')
+          # libselinux 3.10 的 utils/Makefile 用 `-lsepol` 链接 sefcontext_compile，
+          # 但 OpenWrt master 的 TARGET_LDFLAGS 不含 -L$(STAGING_DIR)/usr/lib，
+          # 现存的那个 -L 又出现在 -lsepol 之后，链接器从左到右解析时找不到 libsepol。
+          p = 'package/libs/libselinux/Makefile'
+          s = io.open(p, encoding='utf-8').read()
+          line = 'TARGET_LDFLAGS += -L$(STAGING_DIR)/usr/lib'
+          if line not in s and 'define Build/Compile' in s:
+              s = s.replace('define Build/Compile', line + '\n\n' + 'define Build/Compile', 1)
+              io.open(p, 'w', encoding='utf-8').write(s)
+              print('>>> libselinux: added TARGET_LDFLAGS -L staging/usr/lib')
+          # 3.10 的 make install 落库路径不稳，InstallDev 再从构建目录兜底拷静态库
+          p = 'package/libs/libsepol/Makefile'
+          s = io.open(p, encoding='utf-8').read()
+          needle = '\t$(CP) $(PKG_INSTALL_DIR)/usr/lib/* $(1)/usr/lib/'
+          add = (needle + ' 2>/dev/null || true\n'
+                 '\t$(CP) $(PKG_BUILD_DIR)/src/libsepol.a $(1)/usr/lib/ 2>/dev/null || true')
+          if needle in s and add not in s:
+              s = s.replace(needle, add, 1)
+              io.open(p, 'w', encoding='utf-8').write(s)
+              print('>>> libsepol: staged libsepol.a fallback from build dir')
+          # mtd-utils configure 探测到 staging 的 libselinux.pc 会自动打开
+          # SELinux 支持并链接 -lselinux；但 3.5 的 InstallDev 不落
+          # libselinux.so，mkfs.ubifs 链接报 cannot find -lselinux。本固件
+          # 不需要 SELinux xattr，显式关闭这个可选探测。
+          p = 'package/utils/mtd-utils/Makefile'
+          s = io.open(p, encoding='utf-8').read()
+          anchor = 'include $(INCLUDE_DIR)/package.mk'
+          line = 'CONFIGURE_ARGS += --without-selinux'
+          if line not in s and anchor in s:
+              s = s.replace(anchor, anchor + '\n' + line, 1)
+              io.open(p, 'w', encoding='utf-8').write(s)
+              print('>>> mtd-utils: --without-selinux (libselinux.pc auto-probe)')
+          # libbpf 1.6.2：Build/Install 必须定义在 include package.mk **之后**（package.mk 里是
+          # `Build/Install=$(if $(PKG_INSTALL),$(call Build/Install/Default,))` 无条件赋值）。
+          # 但实测它的 `make install` 在交叉环境下可能一个文件都不落地（ipkg-install 全空，
+          # 连 usr/include/bpf/*.h 都没有，InstallDev 直接 cp cannot stat）。
+          # 因此这里不再依赖上游 install 目标：先 make all，再自己把产物拷进 PKG_INSTALL_DIR。
+          p = 'package/libs/libbpf/Makefile'
+          if os.path.exists(p):
+              s = io.open(p, encoding='utf-8').read()
+              block = (
+                  'define Build/Install\n'
+                  '\t+$(MAKE) $(PKG_JOBS) -C $(PKG_BUILD_DIR)/$(MAKE_PATH) $(TARGET_CONFIGURE_OPTS) $(MAKE_FLAGS) all\n'
+                  '\t$(INSTALL_DIR) $(PKG_INSTALL_DIR)/usr/lib $(PKG_INSTALL_DIR)/usr/include/bpf $(PKG_INSTALL_DIR)/usr/lib/pkgconfig\n'
+                  '\t-$(CP) $(PKG_BUILD_DIR)/$(MAKE_PATH)/libbpf.so* $(PKG_INSTALL_DIR)/usr/lib/\n'
+                  '\t-$(CP) $(PKG_BUILD_DIR)/$(MAKE_PATH)/libbpf.a $(PKG_INSTALL_DIR)/usr/lib/\n'
+                  '\t-$(CP) $(PKG_BUILD_DIR)/$(MAKE_PATH)/*.h $(PKG_INSTALL_DIR)/usr/include/bpf/\n'
+                  '\t-$(CP) $(PKG_BUILD_DIR)/$(MAKE_PATH)/libbpf.pc $(PKG_INSTALL_DIR)/usr/lib/pkgconfig/\n'
+                  '\t@ls $(PKG_INSTALL_DIR)/usr/lib/libbpf.so* >/dev/null 2>&1 || { \\\n'
+                  '\t\techo "ERROR: libbpf 没编出 .so，构建目录内容如下："; \\\n'
+                  '\t\tls -la $(PKG_BUILD_DIR)/$(MAKE_PATH) | head -30; exit 1; }\n'
+                  'endef\n')
+              anchor = 'include $(INCLUDE_DIR)/nls.mk\n'
+              if 'define Build/Install\n' in s:
+                  s = re.sub(r'define Build/Install\n(?:\t.*\n)+endef\n', '', s, count=1)
+              if anchor in s:
+                  s = s.replace(anchor, anchor + '\n' + block, 1)
+              # InstallDev 也从构建目录兜底（上游从 ipkg-install 拷，空目录必炸）
+              s = s.replace(
+                  '\t$(CP) $(PKG_INSTALL_DIR)/usr/include/bpf/*.h $(1)/usr/include/bpf/',
+                  '\t$(CP) $(PKG_INSTALL_DIR)/usr/include/bpf/*.h $(1)/usr/include/bpf/ 2>/dev/null \\\n'
+                  '\t\t|| $(CP) $(PKG_BUILD_DIR)/$(MAKE_PATH)/*.h $(1)/usr/include/bpf/')
+              s = s.replace(
+                  '\t$(CP) $(PKG_INSTALL_DIR)/usr/lib/libbpf.{a,so*} \\\n\t\t$(1)/usr/lib/',
+                  '\t$(CP) $(PKG_INSTALL_DIR)/usr/lib/libbpf.{a,so*} \\\n\t\t$(1)/usr/lib/ 2>/dev/null \\\n'
+                  '\t\t|| $(CP) $(PKG_BUILD_DIR)/$(MAKE_PATH)/libbpf.{a,so*} $(1)/usr/lib/')
+              io.open(p, 'w', encoding='utf-8').write(s)
+              print('>>> libbpf: 自建 Build/Install（不依赖上游 install）+ InstallDev 兜底')
+          if a != 2 or b != 2:
+              raise SystemExit('::error::libsepol/libselinux InstallDev patch incomplete')
+          PY
+          grep -q 'PKG_BUILD_DIR)/include/sepol' package/libs/libsepol/Makefile \
+            || { echo "::error::libsepol 公共头补丁未生效"; exit 1; }
+          grep -q 'PKG_BUILD_DIR)/src/libselinux.pc' package/libs/libselinux/Makefile \
+            || { echo "::error::libselinux .pc 补丁未生效"; exit 1; }
+          grep -q 'CONFIGURE_ARGS += --without-selinux' package/utils/mtd-utils/Makefile \
+            || { echo "::error::mtd-utils --without-selinux 补丁未生效"; exit 1; }
+
       - name: 落地 SL-3000 设备（DTS + 设备块 + 网络 + 升级路径）
         run: |
           set -euo pipefail
