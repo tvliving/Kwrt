@@ -1,23 +1,17 @@
-# Kwrt · CMCC RAX3000M-e（MT7531 交换机）专用构建 —— 与 -v2（AN8855）并存
+# Kwrt · CMCC RAX3000M-e（ImmortalWrt 官方原生支持）
 #
-# 为什么用 openwrt master（6.18）而不是 24.10-6.6：AN8855 的 DSA 驱动与补丁只在
-# master（patches-6.18/737-net-dsa-add-Airoha-AN8855.patch、files-6.18/drivers/net/*an8855*）。
+# 本机型由 ImmortalWrt 官方直接支持，workflow 不再自己写 DTS / 设备块 / U-Boot 补丁，
+# 只做三件事：
+#  1) 克隆 immortalwrt/immortalwrt `openwrt-25.12`（官方已含 mt7981b-cmcc-rax3000me.dts、
+#     filogic.mk 的 Device/cmcc_rax3000me、uboot-mediatek 的 4 个 cmcc_rax3000me 变体）
+#  2) 保留 25.12 树必需的编译修补：libsepol/libselinux 3.9 的 InstallDev（公共头与 .pc）、
+#     mtd-utils 的 --without-selinux（否则 mkfs.ubifs 链接 -lselinux 失败）
+#  3) 叠加本仓库定制：主题 + iStore 市场 + 全量简体中文（scripts/customize.sh）
 #
-# 串口日志定位到的两个真实故障（2026-11-24）：
-#  1) U-Boot：`error: Unable to get reset ctrl for frame engine` → mtk_eth 的
-#     reset_get_by_name(dev,"fe") 失败 → probe 直接 return → 没有 Net 初始化、
-#     没有交换机探测、MAC 全 0 → TFTP 不可用（不是交换机没驱动，是 GMAC 没起来）。
-#  2) 内核：`an8855 mdio-bus:01: Couldn't get our reset line / probe failed -16`
-#     → 上游 DTS 同时声明了 MT7531（switch@1f）和 AN8855，两者都声明
-#     reset-gpios = <&pio 39>，先 probe 的占住 GPIO，AN8855 就 -EBUSY，lan1-3 全废。
-#
-# 因此本 workflow：
-#  - 给 U-Boot 打补丁，保证 ethsys 的 FE reset controller 一定可用（并断言产物）；
-#  - 本版（文件名不带 -v2）默认 switch_dts=mt7531：保持上游 DTS 的双节点定义不动，
-#    适合交换机确实是 MT7531 的机器。AN8855 版请用文件名带 -v2 的那个 workflow。
-#
-# 产物：sysupgrade.itb + nand/ubi 的 bl31-uboot.fip（FIP 必须刷，否则分区布局不对）
-name: Kwrt RAX3000Me (MT7531) 编译
+# 产物：sysupgrade.itb + nand-ddr3 的 bl31-uboot.fip / preloader.bin
+#       （本机是 NAND + DDR3 一种布局，ddr4/emmc 的引导件与本机无关，不发）
+
+name: Kwrt RAX3000Me 编译（ImmortalWrt 官方支持）
 
 on:
   schedule:
@@ -29,13 +23,6 @@ on:
         description: '编译完成后发布 Release'
         type: boolean
         default: true
-      switch_dts:
-        description: '交换机方案：an8855（本机，禁用 MT7531 节点）/ mt7531（保持上游双节点）'
-        type: choice
-        options:
-          - an8855
-          - mt7531
-        default: mt7531
   push:
     branches: [25.12]
     paths:
@@ -52,10 +39,9 @@ env:
   TZ: Asia/Shanghai
   DIST: Kwrt
   PREFIX: kwrt
-  VERSION: '6.18'
+  VERSION: '25.12'
   THEME: vantage
-  DEVICE: cmcc_rax3000m
-  SWITCH_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.switch_dts || 'mt7531' }}
+  DEVICE: cmcc_rax3000me
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   CCACHE_MAXSIZE: 1500M
   CCACHE_COMPRESS: 'true'
@@ -63,7 +49,7 @@ env:
 
 jobs:
   build:
-    name: 🏗️ RAX3000M-e (MT7981B + MT7531)
+    name: 🏗️ RAX3000M-e（官方 25.12）
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     steps:
@@ -116,47 +102,37 @@ jobs:
           sudo timedatectl set-timezone "Asia/Shanghai"
           ccache --version | head -1 || true
 
-      - name: 准备源码树（openwrt master / 6.18：AN8855 驱动在这里）
+      - name: 准备源码树（ImmortalWrt 官方 openwrt-25.12）
         run: |
           rm -rf openwrt .owrt-src
           for i in 1 2 3; do
-            git clone -q --depth 1 -b master https://github.com/openwrt/openwrt .owrt-src && break
+            git clone -q --depth 1 -b openwrt-25.12 \
+              https://github.com/immortalwrt/immortalwrt .owrt-src && break
             echo "::warning::clone 第 $i 次失败，重试"
             rm -rf .owrt-src
             sleep 10
           done
-          [ -d .owrt-src ] || { echo "::error::上游源码克隆失败"; exit 1; }
+          [ -d .owrt-src ] || { echo "::error::ImmortalWrt 源码克隆失败"; exit 1; }
           mv .owrt-src openwrt
-          echo ">>> 源码树：$(cd openwrt && git rev-parse --short HEAD)（$(cd openwrt && git log -1 --format=%cd --date=short)）"
+          cd openwrt
+          echo ">>> 源码树：$(git rev-parse --short HEAD)（$(git log -1 --format=%cd --date=short)）"
+          # 官方原生支持校验：DTS / 设备块 / U-Boot 变体必须都在，缺一说明分支选错
+          test -f target/linux/mediatek/dts/mt7981b-cmcc-rax3000me.dts \
+            || { echo "::error::官方缺 mt7981b-cmcc-rax3000me.dts"; exit 1; }
+          grep -q 'define Device/cmcc_rax3000me' target/linux/mediatek/image/filogic.mk \
+            || { echo "::error::官方 filogic.mk 缺 Device/cmcc_rax3000me"; exit 1; }
+          grep -q 'U-Boot/mt7981_cmcc_rax3000me-nand-ddr3' package/boot/uboot-mediatek/Makefile \
+            || { echo "::error::官方 uboot-mediatek 缺 cmcc_rax3000me 变体"; exit 1; }
+          echo "✔ 官方设备支持已就位（DTS + 设备块 + U-Boot 变体）"
 
-      - name: 修补 U-Boot（FE reset 必须可用，否则 FIP 里 GMAC 起不来）
-        run: |
-          set -euo pipefail
-          cd openwrt/package/boot/uboot-mediatek/patches
-
-          # 串口日志：mtk_eth 的 reset_get_by_name(dev,"fe") 失败会直接 return，
-          # 后面 Net 初始化 / 交换机探测全都不执行 → 没有 IP、无法 TFTP。
-          # 补丁内容（base64，避免 YAML 缩进把 diff 里的 tab 吃掉）：
-          #   - ethsys reset provider 没绑上时，直接按 ETHSYS_HIFSYS_RST_CTRL(0x34)
-          #     的 FE 位（ETHSYS_FE_RST = bit6）做 assert/deassert
-          #   - mtk_eth_start() 里对 rst_fe 的断言加存在性判断，避免空指针
-          base64 -d > 445-net-mtk_eth-fe-reset-fallback.patch <<'B64'
-          LS0tIGEvZHJpdmVycy9uZXQvbXRrX2V0aC9tdGtfZXRoLmMJMjAyNi0xMS0yNCAxNDoxMTowMS4xMTY0NjQyMDAgKzA4MDAKKysrIGIvZHJpdmVycy9uZXQvbXRrX2V0aC9tdGtfZXRoLmMJMjAyNi0xMS0yNCAxNDoxMTowMS4yMDk3NzQyMDAgKzA4MDAKQEAgLTEwNDMsMTAgKzEwNDMsMTIgQEAKIAlpbnQgaSwgcmV0OwogCiAJLyogUmVzZXQgRkUgKi8KLQlyZXNldF9hc3NlcnQoJnByaXYtPnJzdF9mZSk7Ci0JdWRlbGF5KDEwMDApOwotCXJlc2V0X2RlYXNzZXJ0KCZwcml2LT5yc3RfZmUpOwotCW1kZWxheSgxMCk7CisJaWYgKHByaXYtPnJzdF9mZS5kZXYpIHsKKwkJcmVzZXRfYXNzZXJ0KCZwcml2LT5yc3RfZmUpOworCQl1ZGVsYXkoMTAwMCk7CisJCXJlc2V0X2RlYXNzZXJ0KCZwcml2LT5yc3RfZmUpOworCQltZGVsYXkoMTApOworCX0KIAogCWlmIChNVEtfSEFTX0NBUFMocHJpdi0+c29jLT5jYXBzLCBNVEtfTkVUU1lTX1YyKSB8fAogCSAgICBNVEtfSEFTX0NBUFMocHJpdi0+c29jLT5jYXBzLCBNVEtfTkVUU1lTX1YzKSkKQEAgLTEzMzEsOCArMTMzMywxNyBAQAogCS8qIFJlc2V0IGNvbnRyb2xsZXJzICovCiAJcmV0ID0gcmVzZXRfZ2V0X2J5X25hbWUoZGV2LCAiZmUiLCAmcHJpdi0+cnN0X2ZlKTsKIAlpZiAocmV0KSB7Ci0JCXByaW50ZigiZXJyb3I6IFVuYWJsZSB0byBnZXQgcmVzZXQgY3RybCBmb3IgZnJhbWUgZW5naW5lXG4iKTsKLQkJcmV0dXJuIHJldDsKKwkJLyoKKwkJICogZXRoc3lzIOeahCByZXNldCBwcm92aWRlciDmnInlj6/og73msqHlnKggRE0g5omr5o+P6Zi25q6157uR5LiK77yIbWVkaWF0ZWtfcmVzZXRfYmluZAorCQkgKiDlpLHotKXml7blj6rmiZMgZGVidWcg5pel5b+X77yJ77yM5q2k5aSEIHJlc2V0X2dldF9ieV9uYW1lIOi/lOWbniAtRU5PREVW44CCCisJCSAqIOebtOaOpeWGmSBFVEhTWVNfSElGU1lTX1JTVF9DVFJMKDB4MzQpIOeahCBGRSDkvY3vvIhFVEhTWVNfRkVfUlNUID0gYml0Nu+8iQorCQkgKiDlgZrkuIDmrKEgYXNzZXJ0L2RlYXNzZXJ077yM6YG/5YWN5pW05Z2XIEdNQUMg5LiN5Y+v55So44CBVS1Cb290IOmHjOW9u+W6leayoeaciee9kee7nOOAggorCQkgKi8KKwkJcHJpbnRmKCJ3YXJuOiBubyBmZSByZXNldCBjdHJsLCBmYWxsIGJhY2sgdG8gZXRoc3lzIHJzdHIgY3RybFxuIik7CisJCXJlZ21hcF91cGRhdGVfYml0cyhwcml2LT5ldGhzeXNfcmVnbWFwLCAweDM0LCBCSVQoNiksIEJJVCg2KSk7CisJCXVkZWxheSgxMDAwKTsKKwkJcmVnbWFwX3VwZGF0ZV9iaXRzKHByaXYtPmV0aHN5c19yZWdtYXAsIDB4MzQsIEJJVCg2KSwgMCk7CisJCW1kZWxheSgxMCk7CiAJfQogCiAJcHJpdi0+Z21hY19pZCA9IGRldl9yZWFkX3UzMl9kZWZhdWx0KGRldiwgIm1lZGlhdGVrLGdtYWMtaWQiLCAwKTsK
-          B64
-          sed -i 's/^          //' 445-net-mtk_eth-fe-reset-fallback.patch
-          head -5 445-net-mtk_eth-fe-reset-fallback.patch
-          grep -q 'fall back to ethsys rstr ctrl' 445-net-mtk_eth-fe-reset-fallback.patch \
-            || { echo "::error::U-Boot 补丁内容不对"; exit 1; }
-          echo ">>> 已写入 445-net-mtk_eth-fe-reset-fallback.patch"
-
-      - name: 修补上游 libsepol / libselinux 3.10 的 InstallDev（公共头与 .pc）
+      - name: 修补上游 libsepol / libselinux 3.9 的 InstallDev（公共头与 .pc）
         run: |
           set -euo pipefail
           cd openwrt
           python3 - <<'PY'
           import io
 
-          # 上游 openwrt master 的 libsepol / libselinux 都是 3.10，InstallDev 统一从
+          # ImmortalWrt 25.12 的 libsepol / libselinux 都是 3.9，InstallDev 统一从
           # $(PKG_INSTALL_DIR)/usr/include/* 与 usr/lib/pkgconfig/<name>.pc 取文件。
           # 但 3.10 的 make install 并不稳定地把公共头落地：
           #   libsepol 公共头在 include/sepol（src/*.h 全是私有头，没有 sepol.h）
@@ -231,96 +207,6 @@ jobs:
           grep -q 'CONFIGURE_ARGS += --without-selinux' package/utils/mtd-utils/Makefile \
             || { echo "::error::mtd-utils --without-selinux 补丁未生效"; exit 1; }
 
-      - name: 落地 RAX3000Me DTS（MT7531 版：保持上游双节点）
-        run: |
-          set -euo pipefail
-          cd openwrt
-          dts=target/linux/mediatek/dts/mt7981b-cmcc-rax3000me.dts
-          if [ "$SWITCH_MODE" = "an8855" ]; then
-            cat > "$dts" <<'DTS'
-          // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
-          /*
-           * CMCC RAX3000Me —— AN8855 外挂交换机版本
-           *
-           * 与 RAX3000M 共用基础 DTS，但本机没有 MT7531。上游 DTS 里 MT7531 与 AN8855
-           * 都写了 reset-gpios = <&pio 39>，谁先 probe 谁占住 GPIO，另一个必然 -EBUSY：
-           *   内核日志 “an8855 mdio-bus:01: Couldn't get our reset line / probe failed -16”
-           * 所以这里把 MT7531 节点关掉（只改 status，不删节点，避免 &switch 标签悬空），
-           * 让 AN8855 独占 reset GPIO，lan1-3 才能起来。
-           */
-          /dts-v1/;
-          #include "mt7981b-cmcc-rax3000m.dts"
-          
-          / {
-          	model = "CMCC RAX3000Me";
-          };
-          
-          &switch {
-          	status = "disabled";
-          };
-          DTS
-          else
-            cat > "$dts" <<'DTS'
-          // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
-          /* CMCC RAX3000Me —— MT7531 版本：保持上游双节点定义不动 */
-          /dts-v1/;
-          #include "mt7981b-cmcc-rax3000m.dts"
-          
-          / {
-          	model = "CMCC RAX3000Me";
-          };
-          DTS
-          fi
-          sed -i 's/^          //' "$dts"
-          test -s "$dts" || { echo "::error::RAX3000Me DTS 未生成"; exit 1; }
-
-          # device 块改用本机型 DTS（compatible 仍保持 cmcc,rax3000m，
-          # 这样 board.d/02_network、platform.sh、uboot-envtools 都不用改）
-          python3 - <<'PY'
-          import io, re, sys
-          p = 'target/linux/mediatek/image/filogic.mk'
-          s = io.open(p, encoding='utf-8').read()
-          i = s.index('define Device/cmcc_rax3000m\n')
-          j = s.index('endef\n', i)
-          blk = s[i:j]
-          if 'mt7981b-cmcc-rax3000me' not in blk:
-              blk2 = blk.replace('DEVICE_DTS := mt7981b-cmcc-rax3000m\n',
-                                 'DEVICE_DTS := mt7981b-cmcc-rax3000me\n', 1)
-              assert blk2 != blk, 'cmcc_rax3000m 里找不到 DEVICE_DTS 行'
-              s = s[:i] + blk2 + s[j:]
-              io.open(p, 'w', encoding='utf-8').write(s)
-          print('>>> DEVICE_DTS 已切到 mt7981b-cmcc-rax3000me')
-          PY
-          grep -q 'DEVICE_DTS := mt7981b-cmcc-rax3000me' target/linux/mediatek/image/filogic.mk \
-            || { echo "::error::DEVICE_DTS 未切换"; exit 1; }
-
-      - name: 校验 AN8855 / reset GPIO 配置（缺一即失败）
-        run: |
-          set -euo pipefail
-          cd openwrt
-          dts=target/linux/mediatek/dts/mt7981b-cmcc-rax3000m.dts
-          test -f "$dts" || { echo "::error::缺 $dts"; exit 1; }
-          for k in 'airoha,an8855-mfd' 'airoha,an8855-switch' 'airoha,an8855-mdio' 'airoha,an8855-efuse'; do
-            grep -q "$k" "$dts" || { echo "::error::上游 DTS 缺 $k"; exit 1; }
-          done
-          grep -q 'ethernet = <&gmac0>' "$dts" || { echo "::error::AN8855 没接 gmac0"; exit 1; }
-          # reset GPIO 只能有一个控制器在抢：an8855 那份必须存在
-          n=$(grep -c 'reset-gpios = <&pio 39' "$dts" || true)
-          echo ">>> upstream DTS 里 reset-gpios(pio39) 声明数：$n"
-          if [ "$SWITCH_MODE" = "an8855" ]; then
-            grep -q 'status = "disabled"' target/linux/mediatek/dts/mt7981b-cmcc-rax3000me.dts \
-              || { echo "::error::AN8855 模式必须禁用 MT7531 节点"; exit 1; }
-          else
-            if grep -q 'status = "disabled"' target/linux/mediatek/dts/mt7981b-cmcc-rax3000me.dts; then
-              echo "::error::MT7531 模式不应禁用 MT7531 节点"; exit 1
-            fi
-          fi
-          test -f target/linux/mediatek/files-6.18/drivers/net/dsa/an8855.c \
-            || { echo "::error::缺 AN8855 DSA 驱动"; exit 1; }
-          ls target/linux/mediatek/patches-6.18/ | grep -q 'Airoha-AN8855' \
-            || { echo "::error::缺 AN8855 内核补丁"; exit 1; }
-          echo "✔ AN8855（DTS + 内核驱动 + reset GPIO 独占）校验通过（模式 $SWITCH_MODE）"
-
       - name: 恢复 ccache
         uses: actions/cache@v4
         with:
@@ -340,8 +226,8 @@ jobs:
           CONFIG_TARGET_PER_DEVICE_ROOTFS=y
           CONFIG_DEVEL=y
           CONFIG_CCACHE=y
-          # 本 workflow 克隆上游 openwrt master，DEFAULT_PACKAGES 不含 luci；
-          # e5d713e36 重建文件时误删了 6dcc7d9c 加的这一行，导致 uhttpd 未选中。
+          # 官方 immortalwrt 已自带 luci；这里显式打开，防止后续 defconfig 把 luci 收掉
+          # 导致 uhttpd 未选中（历史上踩过这个坑）。
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-app-store=y
           CONFIG_PACKAGE_luci-lib-taskd=y
@@ -368,7 +254,7 @@ jobs:
           sed -i 's/\r$//' scripts/customize.sh
           bash scripts/customize.sh openwrt
 
-      - name: 收敛到 RAX3000M + 校验
+      - name: 收敛到 cmcc_rax3000me + 校验
         run: |
           set -euo pipefail
           cd openwrt
@@ -481,7 +367,7 @@ jobs:
           sed -i 's/^          //' files/etc/uci-defaults/97-rax3000me-wifi
           chmod 755 files/etc/uci-defaults/97-rax3000me-wifi
           test -x files/etc/uci-defaults/97-rax3000me-wifi || { echo "::error::无线脚本缺失"; exit 1; }
-          echo "机型 $DEVICE（RAX3000Me，$SWITCH_MODE）/ 主题 $THEME / iStore + 中文 / 双频无线首启启用"
+          echo "机型 $DEVICE（RAX3000Me，官方 DTS）/ 主题 $THEME / iStore + 中文 / 双频无线首启启用"
 
       - name: 下载源码包
         run: |
@@ -504,88 +390,28 @@ jobs:
             exit 1
           fi
 
-      - name: 构建产物硬校验（U-Boot FE reset / 内核 AN8855 / 新 DTB）
+      - name: 产物硬校验（官方设备产物齐全）
         run: |
           set -uo pipefail
-          cd openwrt
-          # openwrt master 的 U-Boot 是两层构建目录（include/u-boot.mk:14）：
-          #   build_dir/target-*/u-boot-<variant>/u-boot-<version>/
-          # 老脚本只到外层 u-boot-<variant>/，那层没有 .config / u-boot.dtb，
-          # 导致 4 个 CONFIG + u-boot.dtb 全部误报未启用。这里向下找真正产物层。
-          UBROOT=$(ls -d build_dir/target-*/u-boot-mt7981_cmcc_rax3000m-nand-ddr3* 2>/dev/null | head -1)
-          if [ -z "$UBROOT" ]; then
-            echo "::error::找不到 u-boot 构建目录，无法校验 FIP"
-            ls -d build_dir/target-*/u-boot-* 2>/dev/null | head -20
-            exit 1
-          fi
-          UB=$(ls -d "$UBROOT"/u-boot-* 2>/dev/null | head -1)
-          [ -n "$UB" ] && [ -f "$UB/.config" ] || UB="$UBROOT"
-          # 再兜底：若该变体下仍无 .config，全局找同款 U-Boot 的 .config 目录
-          if [ ! -f "$UB/.config" ]; then
-            FOUND=$(find build_dir -type f -name .config -path '*u-boot-mt7981_cmcc_rax3000m-nand*' 2>/dev/null | head -1)
-            [ -n "$FOUND" ] && UB=$(dirname "$FOUND")
-          fi
-          echo ">>> $UB  (root: $UBROOT)"
-          echo "===== U-Boot .config 关键项 ====="
-          grep -E '^(CONFIG_(DM_RESET|RESET_MEDIATEK|MEDIATEK_ETH|MTK_ETH_SWITCH_[A-Z0-9]+|PHY_FIXED)|# CONFIG_(DM_RESET|RESET_MEDIATEK|MTK_ETH_SWITCH_AN8855))' "$UB/.config" || true
+          B=openwrt/bin/targets/mediatek/filogic
+          test -d "$B" || { echo "::error::没有 $B 目录"; ls -R openwrt/bin/targets 2>/dev/null | head -40; exit 1; }
+          echo "===== bin/targets/mediatek/filogic ====="
+          ls -lh "$B" | head -40
           miss=0
-          for k in CONFIG_DM_RESET CONFIG_RESET_MEDIATEK CONFIG_MEDIATEK_ETH CONFIG_MTK_ETH_SWITCH_AN8855; do
-            if grep -q "^${k}=y$" "$UB/.config"; then echo "  [ok] $k"; else echo "  [FAIL] $k 未启用"; miss=$((miss+1)); fi
-          done
-          echo "===== U-Boot DTB eth 节点 ====="
-          # 不同 U-Boot 版本 dtb 落地位置/命名不同（u-boot.dtb / u-boot-<board>.dtb /
-          # arch/arm/dts/*.dtb），2026.07 走 binman 合 FIP 后未必保留 u-boot.dtb。
-          # 只认 $UB/u-boot.dtb 会把好固件判成缺文件（run 45522481944 即此）。
-          DTB=""
-          for c in "$UB/u-boot.dtb" "$UB"/u-boot*.dtb "$UB"/arch/arm/dts/*rax3000m*.dtb "$UB"/arch/arm/dts/*.dtb; do
-            if [ -f "$c" ]; then DTB="$c"; break; fi
-          done
-          if [ -z "$DTB" ]; then
-            DTB=$(find "$UB" -maxdepth 3 -type f -name '*.dtb' 2>/dev/null | head -1 || true)
-          fi
-          if [ -n "$DTB" ]; then
-            echo "  dtb: $DTB"
-            DTS_TXT=$(dtc -I dtb -O dts "$DTB" 2>/dev/null || true)
-            printf '%s\n' "$DTS_TXT" | sed -n '/ethernet@15100000/,/^\t\t};/p' | head -20 || true
-            printf '%s\n' "$DTS_TXT" | grep -q 'reset-names = "fe"' \
-              || { echo "  [FAIL] DTB 里 eth 节点缺 reset-names=\"fe\""; miss=$((miss+1)); }
-            printf '%s\n' "$DTS_TXT" | grep -q 'mediatek,switch = "auto"' \
-              || { echo "  [FAIL] DTB 里没有 mediatek,switch=\"auto\"（交换机不会自动探测）"; miss=$((miss+1)); }
-          else
-            # 兜底：直接查 U-Boot 源码里本机型的 dts（FIP 就是由它编出来的）
-            UBDTS=$(find "$UB/arch/arm/dts" -maxdepth 1 -type f -name '*rax3000m*.dts*' 2>/dev/null | head -1 || true)
-            if [ -n "$UBDTS" ]; then
-              echo "  [warn] 构建目录无 .dtb 产物，改用源码 DTS 校验：$UBDTS"
-              grep -q 'reset-names = "fe"' "$UBDTS" \
-                || { echo "  [FAIL] U-Boot DTS 缺 reset-names=\"fe\""; miss=$((miss+1)); }
-              grep -q 'mediatek,switch = "auto"' "$UBDTS" \
-                || { echo "  [FAIL] U-Boot DTS 没有 mediatek,switch=\"auto\""; miss=$((miss+1)); }
-            else
-              # 再兜底：FIP 里已链入 an8855 且 .config 齐全时，不再因缺 dtb 阻断
-              echo "::warning::找不到 u-boot.dtb 与源码 DTS，改用 .config + FIP 符号判定（见下）"
-            fi
-          fi
-          NM=$(ls staging_dir/toolchain-*/bin/*-nm 2>/dev/null | head -1)
-          echo "===== FIP 内是否含 an8855 驱动符号（nm=$NM） ====="
-          if [ -n "$NM" ] && "$NM" "$UB/u-boot" 2>/dev/null | grep -qi 'an8855'; then
-            echo "  [ok] an8855 驱动已链入 U-Boot"
-          else
-            echo "  [warn] 符号表里没看到 an8855（可能被内联），下面用 .config 兜底判定"
-          fi
+          ls "$B"/*cmcc_rax3000me-squashfs-sysupgrade.itb >/dev/null 2>&1 \
+            || { echo "  [FAIL] 缺 sysupgrade.itb"; miss=$((miss+1)); }
+          ls "$B"/*cmcc_rax3000me-nand-ddr3-bl31-uboot.fip >/dev/null 2>&1 \
+            || { echo "  [FAIL] 缺 nand-ddr3 FIP"; miss=$((miss+1)); }
+          ls "$B"/*cmcc_rax3000me-nand-ddr3-preloader.bin >/dev/null 2>&1 \
+            || { echo "  [FAIL] 缺 nand-ddr3 preloader"; miss=$((miss+1)); }
+          [ "$miss" -eq 0 ] || { echo "::error::产物校验失败 $miss 项"; exit 1; }
+          echo "✔ 官方产物齐全（sysupgrade + nand-ddr3 FIP + preloader）"
 
-          echo "===== 内核 AN8855 驱动与 RAX3000Me DTB ====="
-          KC=$(ls build_dir/target-*/linux-mediatek_filogic/linux-6.18*/.config 2>/dev/null | head -1)
-          if [ -n "$KC" ] && grep -q '^CONFIG_NET_DSA_AN8855=y$' "$KC"; then
-            echo "  [ok] CONFIG_NET_DSA_AN8855=y"
-          else
-            echo "  [FAIL] 内核没编进 AN8855 DSA 驱动"; miss=$((miss+1))
+          KC=$(ls build_dir/target-*/linux-mediatek_filogic/linux-*/.config 2>/dev/null | head -1)
+          if [ -n "$KC" ]; then
+            echo "===== 内核关键项 ====="
+            grep -E '^(CONFIG_NET_DSA_AN8855|CONFIG_NET_DSA_MT7530)=' "$KC" || true
           fi
-          if ls build_dir/target-*/linux-mediatek_filogic/image-mt7981b-cmcc-rax3000me.dtb >/dev/null 2>&1; then
-            echo "  [ok] RAX3000Me DTB 已生成"
-          else
-            echo "  [FAIL] 没生成 image-mt7981b-cmcc-rax3000me.dtb（DTS 没被编译）"; miss=$((miss+1))
-          fi
-          [ "$miss" -eq 0 ] || { echo "::error::产物校验失败 $miss 项：刷进去仍然会没有网络/没有 LAN"; exit 1; }
 
       - name: 收集产物（sysupgrade.itb + FIP + preloader）
         run: |
@@ -612,8 +438,8 @@ jobs:
               mediatek-*) mv -f "$f" "out/${PREFIX}-${b}" ;;
             esac
           done
-          # 机型名统一成 rax3000me：DEVICE 仍是 cmcc_rax3000m（只把 DTS 换成 ME 的），
-          # 文件名带 M 会让人以为刷错机器
+          # 官方产物名已是 cmcc_rax3000me；这里保留一次兜底改名，
+          # 防止某些分支仍用 cmcc_rax3000m 前缀（文件名带 M 会让人以为刷错机器）
           for f in out/*; do
             [ -e "$f" ] || continue
             b=$(basename "$f")
@@ -670,10 +496,10 @@ jobs:
           ( cd out && sha256sum ./* > sha256sums.txt )
           ls -lh out
           {
-            echo "## 🏗️ RAX3000M-e（MT7531）编译完成"
+            echo "## 🏗️ RAX3000M-e（官方 25.12）编译完成"
             echo ""
-            echo "- 交换机 DTS 方案：\`$SWITCH_MODE\`"
-            echo "- U-Boot：FE reset 已可用，交换机 auto 探测（含 an8855 驱动）"
+            echo "- 源码：ImmortalWrt 官方 openwrt-25.12（cmcc_rax3000me 原生支持）"
+            echo "- 交换机：官方 DTS（AN8855 定义），未做任何修改"
             echo ""
             echo "| 文件 | 大小 |"
             echo "|---|---|"
@@ -701,7 +527,7 @@ jobs:
           if-no-files-found: warn
 
   release:
-    name: 📦 发布 kwrt-6.18-日期-rax3000me
+    name: 📦 发布 kwrt-25.12-日期-rax3000me
     needs: build
     if: ${{ always() && needs.build.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.make_release) }}
     runs-on: ubuntu-24.04
@@ -730,45 +556,24 @@ jobs:
             TAG="${TAG}-r${GITHUB_RUN_NUMBER}"
           fi
           cat > notes.md <<'EOF'
-          Kwrt 6.18（openwrt master）· CMCC RAX3000M-e · MT7531 交换机
+          Kwrt 25.12（immortalwrt/openwrt-25.12）· CMCC RAX3000M-e
 
-          - 机型：MT7981B + MT7531（3x GbE LAN）；WAN 走 gmac1
-          - 网口：MT7531 port0/1/2 → lan3/lan2/lan1（上游默认布局）
+          - 机型：MT7981B，官方 DTS 定义为 AN8855 外挂交换机（3x GbE LAN + 2.5G 上行到 gmac0）；WAN 走 gmac1
+          - 源码：ImmortalWrt 官方 `openwrt-25.12`，设备 `cmcc_rax3000me` 由官方原生支持
+            （DTS / filogic.mk 设备块 / uboot-mediatek 的 nand-ddr3 等变体全部来自官方），
+            本 workflow 不改动任何 DTS、设备块与 U-Boot。
+          - 若你的机器 TTL 报 `an8855 ... probe failed -16`（交换机抢 reset GPIO），
+            请改用 `-v2` 那套 workflow。
           - 无线：mt7915e，首启双频 AP `RAX3000ME-2.4G / RAX3000ME-5G`（CN、5G HE160、2.4G HE40）
           - 界面：vantage + iStore 市场 + 全量简体中文 + 强制 zh_cn
           - 产物（只发本机 3 件）：`*-cmcc_rax3000me-squashfs-sysupgrade.itb` +
             `*-cmcc_rax3000me-nand-ddr3-bl31-uboot.fip` + `*-cmcc_rax3000me-nand-ddr3-preloader.bin`
-            （ddr4 / ubi / emmc 是同系列其它机型的引导件，不属于 RAX3000M-e）
-
-          ### 这一版修了什么（对着串口日志）
-
-          1. `error: Unable to get reset ctrl for frame engine`
-             原来的 FIP 里 mtk_eth 拿不到 ethsys 的 FE reset，probe 直接返回：没有 Net 初始化、
-             没有交换机探测、MAC 全 0，所以 TTL 进 U-Boot 也 TFTP 不了。
-             本版在 U-Boot 里补了 FE reset 兜底，并在构建时硬校验
-             `DM_RESET / RESET_MEDIATEK / MTK_ETH_SWITCH_AN8855` 与 dtb 里的 `reset-names="fe"`。
-          2. 本版是 **MT7531 版**（默认 `switch_dts=mt7531`）：保持上游 DTS 的双节点定义，
-             MT7531 节点 `status` 不动。AN8855 版本请用 `*-rax3000me-v2` 那个 workflow。
-             注意：MT7531 与 AN8855 在上游 DTS 里都声明 `reset-gpios = <&pio 39>`，
-             若你的机器实际是 AN8855，必须用 v2，否则 an8855 会 -EBUSY。
-
-          ### 刷机步骤
-
-          1. 先刷 FIP：**本机是 NAND + 512MB DDR3 → 用 `*-nand-ddr3-bl31-uboot.fip`**
-             （串口日志里 `EMI: Using DDR3 settings`、`DRAM 512 MiB`）。
-             若 BL2 也被覆盖，先刷 `*-nand-ddr3-preloader.bin`。
-          2. 进 U-Boot 后 `setenv ipaddr 192.168.1.1; setenv serverip 192.168.1.2`，TFTP 拉 `*-sysupgrade.itb` 烧写。
-          3. 首次刷入前备份原厂分区；无线默认开放，刷完立即设密码。
-
-          ### 如果刷完 LAN 还是不通
-
-          - 确认 FIP 是本 Release 的版本（旧 FIP 的 FE reset 是坏的，网口一定起不来）。
-          - 若你的机器实际是 MT7531 版而不是 AN8855，用 `switch_dts=mt7531` 重新触发一次。
+            （本机 NAND + DDR3 一种布局；ddr4 / emmc 是同系列其它机型的引导件）
           EOF
           for i in 1 2 3 4 5; do
             echo ">>> 第 $i 次上传"
             if ! gh release view "$TAG" >/dev/null 2>&1; then
-              gh release create "$TAG" --title "Kwrt 6.18 · RAX3000M-e · ${DATE}" --notes-file notes.md || true
+              gh release create "$TAG" --title "Kwrt 25.12 · RAX3000M-e · ${DATE}" --notes-file notes.md || true
             fi
             if gh release upload "$TAG" rel/* --clobber; then
               echo ">>> 上传成功（第 $i 次）"; exit 0
