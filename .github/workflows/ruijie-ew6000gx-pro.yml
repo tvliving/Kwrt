@@ -207,6 +207,25 @@ jobs:
               return n
 
           a = fix('package/libs/libsepol/Makefile', 'libsepol', 'include/sepol')
+          # libbpf 1.6.2：增量/缓存场景下 ipkg-install 里可能只有 libbpf.a，
+          # 而 Package/libbpf/install 硬拷 libbpf.so.* 会直接失败
+          # （action 仓库 6000GX 构建即栽在 cp cannot stat libbpf.so.*）。
+          # 强制 install 之前先重建 all（含 SHARED_LIBS），保证 .so 一定存在。
+          p = 'package/libs/libbpf/Makefile'
+          if os.path.exists(p):
+              s = io.open(p, encoding='utf-8').read()
+              if 'define Build/Install\n' not in s:
+                  s = s.replace(
+                      'MAKE_PATH = src\n',
+                      'MAKE_PATH = src\n\n'
+                      'define Build/Install\n'
+                      '\t+$(MAKE) $(PKG_JOBS) -C $(PKG_BUILD_DIR)/$(MAKE_PATH) $(TARGET_CONFIGURE_OPTS) $(MAKE_FLAGS) all\n'
+                      '\t+$(MAKE) $(PKG_JOBS) -C $(PKG_BUILD_DIR)/$(MAKE_PATH) $(TARGET_CONFIGURE_OPTS) $(MAKE_FLAGS) DESTDIR=$(PKG_INSTALL_DIR) install\n'
+                      'endef\n', 1)
+                  io.open(p, 'w', encoding='utf-8').write(s)
+                  print('>>> libbpf: Build/Install 强制 all + install（保证 .so 产出）')
+              else:
+                  print('>>> libbpf: Build/Install 已存在，跳过')
           b = fix('package/libs/libselinux/Makefile', 'libselinux', 'include/selinux')
           # libselinux 3.9 的 utils/Makefile 用 `-lsepol` 链接 sefcontext_compile，
           # 但 OpenWrt 25.12 的 TARGET_LDFLAGS 不含 -L$(STAGING_DIR)/usr/lib，
@@ -509,6 +528,12 @@ jobs:
           assert has_wifi, dts + ' 及包含的 dtsi 里没有 WiFi 节点'
           assert ('eeprom' in text) or ('nvmem-cells' in text) or ('calibration' in text), dts + ' 没有 WiFi 校准(eeprom) 引用'
           print('✔ DTS:', dts, '（含 WiFi 节点与校准，展开 %d 个文件）' % len(seen))
+          if slug in ('ew6000gxpro', 'x60new'):
+              assert 'wf_dbdc' in text, dts + ' 缺 wf_dbdc pinctrl（MT7986 双频并发必需，5G 起不来）'
+              assert re.search(r'pinctrl-names\s*=\s*"default"\s*,\s*"dbdc"', text), \
+                  dts + ' 的 &wifi 缺 pinctrl-names "default","dbdc"'
+              assert re.search(r'pinctrl-1\s*=\s*<&wf_dbdc_pins>', text), dts + ' 缺 pinctrl-1 = <&wf_dbdc_pins>'
+              print('✔ DBDC pinctrl 已就位（2.4G + 5G 可同时工作）')
           PY
           
           WIFI_SH="$SRC/files/etc/uci-defaults/97-ruijie-wifi"
@@ -771,51 +796,57 @@ jobs:
           fi
           ls out | grep -q "^${PREFIX}-" || { echo "::error::产物名不是 ${PREFIX}- 前缀"; ls out; exit 1; }
 
-          # 用镜像 manifest 做端到端校验：无线驱动、主题、iStore、中文必须在最终 rootfs 里
-          # 注意：本步骤启用了 nullglob + set -u，必须用数组判断；否则 ls 在无匹配时会列出
-          # 当前目录，把 openwrt/LICENSE 当成 manifest（正是 11-24 全机型失败的原因）。
+          # 端到端校验：无线驱动 / 主题 / iStore / 中文必须真的在最终 rootfs 里。
+          # 本步骤开了 nullglob + set -u，两个坑必须避开：
+          #   1) 不能写 MAN=$(ls out/*.manifest)：glob 不匹配时 nullglob 会把参数删掉，
+          #      ls 无参就列当前目录 —— 历史上把 openwrt/BSDmakefile 当成清单，7 项全灭；
+          #   2) 数组展开必须用 ${arr[@]+...}，否则 set -u 报未绑定。
           manif=( out/*"$DEV"*.manifest )
           MAN=""
           if [ ${#manif[@]} -gt 0 ]; then MAN="${manif[0]}"; fi
-          if [ -z "$MAN" ]; then
-            # sysupgrade-tar 镜像里的 CONTROL 只有一行 BOARD=<board>（见 openwrt
-            # scripts/sysupgrade-tar.sh），不含包清单，拿它 grep 必然全 miss。
-            # 改为从镜像内 squashfs 的 /usr/lib/opkg/status 取已安装包名。
-            imgs=( out/*"$DEV"*sysupgrade* )
-            IMG=""
-            for f in ${imgs[@]+"${imgs[@]}"}; do
-              case "$f" in *.sha256|*.json|*.buildinfo) continue ;; esac
-              IMG="$f"; break
-            done
-            if [ -n "$IMG" ] && command -v unsquashfs >/dev/null 2>&1; then
+          imgs=( out/*"$DEV"*sysupgrade* )
+          IMG=""
+          if [ ${#imgs[@]} -gt 0 ]; then IMG="${imgs[0]}"; fi
+
+          # sysupgrade-tar 机型通常没有 .manifest，改为解出 rootfs 里的包数据库
+          # （apk: lib/apk/db/installed 的 P: 行；opkg: usr/lib/opkg/status 的 Package: 行）
+          PKGS=$(mktemp)
+          if [ -n "$MAN" ]; then
+            awk '{print $1}' "$MAN" | grep -v '^$' > "$PKGS" || true
+            echo "[info] 用镜像 manifest 校验：$MAN"
+          elif [ -n "$IMG" ]; then
+            command -v unsquashfs >/dev/null 2>&1 \
+              || sudo apt-get install -y -qq squashfs-tools >/dev/null 2>&1 || true
+            if command -v unsquashfs >/dev/null 2>&1; then
               TMPD=$(mktemp -d)
-              tar -xf "$IMG" -C "$TMPD" || true
-              roots=( "$TMPD"/*/root )
-              if [ ${#roots[@]} -gt 0 ] && [ -f "${roots[0]}" ]; then
-                # 归一化成「包名 + 空格」，下方 ^${k} 的匹配方式保持不变
-                unsquashfs -cat "${roots[0]}" usr/lib/opkg/status 2>/dev/null \
-                  | sed -n 's/^Package: \(.*\)$/\1 /p' > "$TMPD/pkgs.txt"
-                if [ -s "$TMPD/pkgs.txt" ]; then
-                  MAN="$TMPD/pkgs.txt"
-                  echo "[info] 无 .manifest，改用镜像 rootfs 的 opkg status 校验：$MAN"
+              tar -xf "$IMG" -C "$TMPD" 2>/dev/null || true
+              ROOTFS=$(ls "$TMPD"/*/root 2>/dev/null | head -1 || true)
+              if [ -n "$ROOTFS" ]; then
+                unsquashfs -no-progress -f -d "$TMPD/sq" "$ROOTFS" >/dev/null 2>&1 || true
+                if [ -f "$TMPD/sq/lib/apk/db/installed" ]; then
+                  sed -n 's/^P:\(.*\)$/\1/p' "$TMPD/sq/lib/apk/db/installed" > "$PKGS"
+                  echo "[info] 无 .manifest，改用镜像 apk 数据库校验（$(wc -l < "$PKGS") 个包）"
+                elif [ -f "$TMPD/sq/usr/lib/opkg/status" ]; then
+                  sed -n 's/^Package: \(.*\)$/\1/p' "$TMPD/sq/usr/lib/opkg/status" > "$PKGS"
+                  echo "[info] 无 .manifest，改用镜像 opkg 数据库校验（$(wc -l < "$PKGS") 个包）"
                 fi
               fi
             fi
           fi
-          if [ -z "$MAN" ]; then
-            echo "::warning::缺 .manifest 且无法从镜像 rootfs 取包清单，跳过包清单硬校验"
+
+          if [ ! -s "$PKGS" ]; then
+            echo "::warning::拿不到镜像包清单（无 .manifest 且无法解包 rootfs），跳过端到端包校验"
+            ls -lh out || true
           else
-            echo "===== 包清单校验（$MAN）====="
             miss=0
             for k in $WIFI_PKGS luci-app-store "luci-theme-${THEME}" luci-i18n-base-zh-cn; do
-              if grep -q "^${k} " "$MAN"; then
+              if grep -qx "$k" "$PKGS"; then
                 echo "  [ok] $k"
               else
                 echo "  [FAIL] 镜像清单缺 $k"; miss=$((miss + 1))
               fi
             done
-            # wpad 变体随仓库不同，只要有一个 hostapd 套件就行
-            if grep -qE '^(wpad-basic-mbedtls|wpad-openssl|wpad-mbedtls|wpad) ' "$MAN"; then
+            if grep -qE '^(wpad-basic-mbedtls|wpad-openssl|wpad-mbedtls|wpad)$' "$PKGS"; then
               echo "  [ok] wpad"
             else
               echo "  [FAIL] 镜像清单缺 wpad（无线起不了 AP）"; miss=$((miss + 1))
