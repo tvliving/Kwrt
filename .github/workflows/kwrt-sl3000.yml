@@ -1,0 +1,850 @@
+# Kwrt · SL-3000（司络 SL3000，MT7981B + MT7976CN，eMMC 引导）
+#
+# 移植来源：wuhanhao456/sl3000-openwrt（ImmortalWrt 24.10 云编译，2026-09 更新）
+#   上游只做 sl_3000-emmc 一种布局（128G eMMC 为 rootfs，32M SPI-NOR 存 BL2/FIP/Factory），
+#   因此本 workflow 也只产 sysupgrade，不产 factory。
+#
+# 相对上游修的三处：
+#   1) 删掉上游 DTS 里写死的 memory 512MB —— 本机有 512M/1G 两版，交给 U-Boot 传参自动适配
+#   2) 02_network 单独写 sl,3000* -> lan1-3 + wan（上游套 routerich 组会错配成 eth1，
+#      而本机 WAN 是 DSA 的 port@3 label="wan"）
+#   3) platform.sh 的 do_upgrade / copy_config 两处都加 sl,3000*（走 emmc_do_upgrade），
+#      并加首启无线脚本：开机启用 2.4G(HE40) + 5G(HE160) 两个 AP
+#
+# 产物命名：kwrt-24.10-<日期>-sl3000-emmc-squashfs-sysupgrade.bin
+name: Kwrt SL-3000 编译（ImmortalWrt 24.10）
+
+on:
+  schedule:
+    # 北京时间每周一 08:30 = UTC 00:30（跟随本仓库其他机型）
+    - cron: '30 0 * * 1'
+  workflow_dispatch:
+    inputs:
+      make_release:
+        description: '编译完成后发布 Release'
+        type: boolean
+        default: true
+  push:
+    branches: [25.12]
+    paths:
+      - '.github/workflows/kwrt-sl3000.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sl3000-kwrt
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Shanghai
+  DIST: Kwrt
+  PREFIX: kwrt
+  VERSION: '24.10'
+  THEME: vantage
+  DEVICE: sl_3000-emmc
+  MODEL: sl3000-emmc
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 1500M
+  CCACHE_COMPRESS: 'true'
+  CCACHE_NOHASHDIR: 'true'
+
+jobs:
+  build:
+    name: 🏗️ SL-3000（MT7981B + MT7976CN）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - name: 检出构建仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 释放磁盘空间并加大 swap
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache /usr/local/share/boost \
+                      /usr/local/lib/node_modules /usr/lib/jvm \
+                      /usr/share/swift /usr/share/miniconda /usr/share/rust \
+                      /usr/share/kotlinc /usr/share/gradle-* /opt/az \
+                      /opt/microsoft /usr/local/aws-cli /usr/local/.ghcup \
+                      /etc/mysql /etc/php /usr/local/go /opt/pipx 2>/dev/null || true
+          sudo systemctl stop docker docker.socket containerd 2>/dev/null || true
+          sudo rm -rf /var/lib/docker /var/lib/containerd 2>/dev/null || true
+          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* 2>/dev/null || true
+          sudo apt-get clean 2>/dev/null || true
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /swapfile 2>/dev/null || true
+          if sudo fallocate -l 4G /swapfile 2>/dev/null; then
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile >/dev/null 2>&1 && sudo swapon /swapfile
+          fi
+          df -h / | tail -1
+          free -h
+
+      - name: 安装编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get update -qq -o Acquire::Retries=3 || sudo -E apt-get update -qq
+          sudo -E apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev libelf-dev python3-setuptools \
+            rsync swig unzip zlib1g-dev file wget dwarves llvm python3-pyelftools \
+            libpython3-dev aria2 jq ccache rename device-tree-compiler \
+            libgmp3-dev libmpc-dev pahole libdw-dev zstd \
+            autoconf automake autopoint binutils bzip2 cpio curl genisoimage \
+            gperf haveged help2man intltool libc6-dev-i386 libfuse-dev \
+            libglib2.0-dev libltdl-dev libmpfr-dev libncurses-dev \
+            libncursesw5-dev libreadline-dev libtool libxslt1-dev lrzsz \
+            ninja-build p7zip p7zip-full patch pkgconf python3-ply \
+            python3-docutils qemu-utils scons squashfs-tools subversion texinfo \
+            uglifyjs upx-ucl vim xxd
+          sudo timedatectl set-timezone "Asia/Shanghai"
+          ccache --version | head -1 || true
+
+      - name: 准备源码树（ImmortalWrt 官方 openwrt-24.10）
+        run: |
+          rm -rf openwrt .owrt-src
+          for i in 1 2 3; do
+            git clone -q --depth 1 -b openwrt-24.10 \
+              https://github.com/immortalwrt/immortalwrt .owrt-src && break
+            echo "::warning::clone 第 $i 次失败，重试"
+            rm -rf .owrt-src
+            sleep 10
+          done
+          [ -d .owrt-src ] || { echo "::error::ImmortalWrt 源码克隆失败"; exit 1; }
+          mv .owrt-src openwrt
+          cd openwrt
+          echo ">>> 源码树：$(git rev-parse --short HEAD)（$(git log -1 --format=%cd --date=short)）"
+          test -f target/linux/mediatek/image/filogic.mk
+          # DTS include 的基础 dtsi 必须在（不同小版本文件名可能不同，这里给兜底提示）
+          ls target/linux/mediatek/dts/mt7981*.dtsi | head -5 || true
+
+      - name: 落地 SL-3000 设备（DTS + 设备块 + 网络 + 升级路径）
+        run: |
+          set -euo pipefail
+          cd openwrt
+          dts=target/linux/mediatek/dts/mt7981b-sl-3000-emmc.dts
+          cat > "$dts" <<'DTS'
+          // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+
+          /dts-v1/;
+          #include <dt-bindings/gpio/gpio.h>
+          #include <dt-bindings/input/input.h>
+          #include <dt-bindings/leds/common.h>
+
+          #include "mt7981.dtsi"
+
+          / {
+          	model = "SL-3000 eMMC bootstrap versions";
+          	compatible = "sl,3000-emmc", "mediatek,mt7981";
+
+          	aliases {
+          		serial0 = &uart0;
+          		led-boot = &status_red_led;
+          		led-failsafe = &status_red_led;
+          		led-running = &status_green_led;
+          		led-upgrade = &status_blue_led;
+          	};
+
+          	chosen {
+          		bootargs = "root=PARTLABEL=rootfs rootwait";
+          		stdout-path = "serial0:115200n8";
+          	};
+
+          	gpio-keys {
+          		compatible = "gpio-keys";
+
+          		button-mesh {
+          			label = "mesh";
+          			linux,code = <BTN_9>;
+          			linux,input-type = <EV_SW>;
+          			gpios = <&pio 0 GPIO_ACTIVE_LOW>;
+          		};
+
+          		button-reset {
+          			label = "reset";
+          			linux,code = <KEY_RESTART>;
+          			gpios = <&pio 1 GPIO_ACTIVE_LOW>;
+          		};
+          	};
+
+          	gpio-leds {
+          		compatible = "gpio-leds";
+
+                          status_red_led: led-0 {
+                                  label = "red:status";
+                                  gpios = <&pio 10 GPIO_ACTIVE_LOW>;
+                          };
+
+                          status_green_led: led-1 {
+                                  label = "green:status";
+                                  gpios = <&pio 11 GPIO_ACTIVE_LOW>;
+                          };
+
+                          status_blue_led: led-2 {
+                                  label = "blue:status";
+                                  gpios = <&pio 12 GPIO_ACTIVE_LOW>;
+          		};
+          	};
+          };
+
+          &eth {
+          	status = "okay";
+
+          	gmac0: mac@0 {
+          		compatible = "mediatek,eth-mac";
+          		reg = <0>;
+          		phy-mode = "2500base-x";
+
+          		fixed-link {
+          			speed = <2500>;
+          			full-duplex;
+          			pause;
+          		};
+          	};
+
+          	gmac1: mac@1 {
+          		compatible = "mediatek,eth-mac";
+          		reg = <1>;
+          		phy-mode = "2500base-x";
+
+          		fixed-link {
+          			speed = <2500>;
+          			full-duplex;
+          			pause;
+          		};
+          	};
+
+
+
+          	mdio: mdio-bus {
+          		#address-cells = <1>;
+          		#size-cells = <0>;
+
+
+          		switch@0 {
+          			compatible = "mediatek,mt7531";
+          			reg = <31>;
+          			reset-gpios = <&pio 39 0>;
+
+          			ports {
+          				#address-cells = <1>;
+          				#size-cells = <0>;
+
+          				port@0 {
+          					reg = <0>;
+          					label = "lan1";
+          				};
+
+          				port@1 {
+          					reg = <1>;
+          					label = "lan2";
+          				};
+
+          				port@2 {
+          					reg = <2>;
+          					label = "lan3";
+          				};
+
+          				port@3 {
+          					reg = <3>;
+          					label = "wan";
+          				};
+
+          				port@6 {
+          					reg = <6>;
+          					label = "cpu";
+          					ethernet = <&gmac0>;
+          					phy-mode = "2500base-x";
+
+          					fixed-link {
+          						speed = <2500>;
+          						full-duplex;
+          						pause;
+          					};
+          				};
+          			};
+          		};
+          	};
+          };
+
+          &mmc0 {
+          	bus-width = <8>;
+          	cap-mmc-highspeed;
+          	max-frequency = <52000000>;
+          	no-sd;
+          	no-sdio;
+          	non-removable;
+          	pinctrl-names = "default", "state_uhs";
+          	pinctrl-0 = <&mmc0_pins_default>;
+          	pinctrl-1 = <&mmc0_pins_uhs>;
+          	vmmc-supply = <&reg_3p3v>;
+          	status = "okay";
+
+          	card@0 {
+          		compatible = "mmc-card";
+          		reg = <0>;
+
+          		block {
+          			compatible = "block-device";
+
+          			partitions {
+          				block-partition-factory {
+          					partname = "factory";
+
+          					nvmem-layout {
+          						compatible = "fixed-layout";
+          						#address-cells = <1>;
+          						#size-cells = <1>;
+
+          						eeprom_factory_0: eeprom@0 {
+          							reg = <0x0 0x1000>;
+          						};
+
+          						macaddr_factory_emmc: macaddr@4 {
+          							compatible = "mac-base";
+          							reg = <0x4 0x6>;
+          							#nvmem-cell-cells = <1>;
+          						};
+          					};
+          				};
+          			};
+          		};
+          	};
+          };
+
+          &pio {
+          	mmc0_pins_default: mmc0-pins-default {
+          		mux {
+          			function = "flash";
+          			groups = "emmc_45";
+          		};
+          	};
+
+          	mmc0_pins_uhs: mmc0-pins-uhs {
+          		mux {
+          			function = "flash";
+          			groups = "emmc_45";
+          		};
+          	};
+
+          	spi2_flash_pins: spi2-pins {
+          		mux {
+          			function = "spi";
+          			groups = "spi2", "spi2_wp_hold";
+          		};
+
+          		conf-pu {
+          			pins = "SPI2_CS", "SPI2_HOLD", "SPI2_WP";
+          			drive-strength = <MTK_DRIVE_8mA>;
+          			bias-pull-up = <MTK_PUPD_SET_R1R0_11>;
+          		};
+
+          		conf-pd {
+          			pins = "SPI2_CLK", "SPI2_MOSI", "SPI2_MISO";
+          			drive-strength = <MTK_DRIVE_8mA>;
+          			bias-pull-down = <MTK_PUPD_SET_R1R0_11>;
+          		};
+          	};
+          };
+
+          &spi2 {
+          	pinctrl-names = "default";
+          	pinctrl-0 = <&spi2_flash_pins>;
+          	status = "okay";
+
+          	spi_nor@0 {
+          		#address-cells = <1>;
+          		#size-cells = <1>;
+          		compatible = "jedec,spi-nor";
+          		reg = <0>;
+          		spi-max-frequency = <52000000>;
+          		spi-tx-bus-width = <4>;
+          		spi-rx-bus-width = <4>;
+
+          		partitions {
+          			compatible = "fixed-partitions";
+          			#address-cells = <1>;
+          			#size-cells = <1>;
+
+          			partition@00000 {
+          				label = "BL2";
+          				reg = <0x00000 0x0100000>;
+          			};
+          			partition@100000 {
+          				label = "u-boot-env";
+          				reg = <0x0100000 0x0080000>;
+          			};
+          			factory_nor: partition@180000 {
+          				label = "Factory";
+          				reg = <0x180000 0x0200000>;
+
+          				nvmem-layout {
+          					compatible = "fixed-layout";
+          					#address-cells = <1>;
+          					#size-cells = <1>;
+
+          					macaddr_factory_4: macaddr@4 {
+          						compatible = "mac-base";
+          						reg = <0x4 0x6>;
+          						#nvmem-cell-cells = <1>;
+          					};
+          				};
+          			};
+          			partition@380000 {
+          				label = "FIP";
+          				reg = <0x380000 0x0200000>;
+          			};
+          		};
+          	};
+          };
+
+          &uart0 {
+          	status = "okay";
+          };
+
+          &watchdog {
+          	status = "okay";
+          };
+
+          &wifi {
+          	mediatek,mtd-eeprom = <&factory_nor 0x0>;
+
+          	status = "okay";
+
+          	band@1 {
+          		reg = <1>;
+          		nvmem-cells = <&macaddr_factory_4 1>;
+          		nvmem-cell-names = "mac-address";
+          	};
+          };
+
+          &usb_phy {
+          	status = "okay";
+          };
+
+          &xhci {
+          	status = "okay";
+          };
+          DTS
+          sed -i 's/^          //' "$dts"
+          test -s "$dts" || { echo "::error::DTS 未生成"; exit 1; }
+          # DTS 自检：无线节点必须在（2.4G/5G 都靠它）
+          grep -q '&wifi {' "$dts" || { echo "::error::DTS 缺 &wifi 节点"; exit 1; }
+          grep -q 'mediatek,mtd-eeprom' "$dts" || { echo "::error::DTS 缺 eeprom"; exit 1; }
+          python3 - <<'PY'
+          import io, os, re, sys
+
+          dev = 'sl_3000-emmc'
+          dts = 'target/linux/mediatek/dts/mt7981b-%s.dts' % dev.replace('_', '-')
+          assert os.path.exists(dts), 'DTS 未落地: ' + dts
+
+          # 1) filogic.mk 设备块：只产 sysupgrade（sysupgrade-tar），不产 factory
+          p = 'target/linux/mediatek/image/filogic.mk'
+          s = io.open(p, encoding='utf-8').read()
+          if 'define Device/sl_3000-emmc' not in s:
+              s += '''
+          define Device/sl_3000-emmc
+            DEVICE_VENDOR := SL
+            DEVICE_MODEL := 3000 eMMC
+            DEVICE_DTS := mt7981b-sl-3000-emmc
+            DEVICE_DTS_DIR := ../dts
+            SUPPORTED_DEVICES := sl,3000-emmc sl,3000
+            DEVICE_PACKAGES := kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware \\
+          	f2fsck losetup mkf2fs kmod-fs-f2fs kmod-mmc
+            IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+          endef
+          TARGET_DEVICES += sl_3000-emmc
+          '''
+              io.open(p, 'w', encoding='utf-8').write(s)
+          print('>>> filogic.mk: Device/sl_3000-emmc')
+
+          # 2) 02_network：本机 WAN 是 DSA port@3(label=wan)，不能套 routerich 的 eth1
+          p = 'target/linux/mediatek/filogic/base-files/etc/board.d/02_network'
+          s = io.open(p, encoding='utf-8').read()
+          if 'sl,3000' not in s:
+              anchor = '\tzbtlink,zbt-z8103ax-c)\n\t\tucidef_set_interfaces_lan_wan "lan1 lan2 lan3" eth1\n\t\t;;\n'
+              assert anchor in s, '02_network 锚点变化'
+              add = ('\tsl,3000*)\n'
+                     '\t\tucidef_set_interfaces_lan_wan "lan1 lan2 lan3" wan\n'
+                     '\t\t;;\n')
+              s = s.replace(anchor, anchor + add, 1)
+              io.open(p, 'w', encoding='utf-8').write(s)
+          print('>>> 02_network: sl,3000* -> lan1-3 + wan')
+
+          # 3) platform.sh：do_upgrade 与 copy_config 两处都要有（eMMC 升级路径）
+          p = 'target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh'
+          s = io.open(p, encoding='utf-8').read()
+          n = 0
+          if 'sl,3000' not in s:
+              old = '\thuasifei,wh3000-pro|\\\n'
+              c = s.count(old)
+              assert c >= 2, 'platform.sh 锚点数量异常: %d' % c
+              s = s.replace(old, old + '\tsl,3000|\\\n\tsl,3000-emmc|\\\n')
+              n = c
+              io.open(p, 'w', encoding='utf-8').write(s)
+          print('>>> platform.sh: sl,3000 已加入 %d 处（do_upgrade / copy_config）' % (n or 2))
+
+          # 4) 断言
+          s = io.open('target/linux/mediatek/image/filogic.mk', encoding='utf-8').read()
+          assert 'define Device/sl_3000-emmc' in s
+          assert s.count('IMAGE/sysupgrade.bin := sysupgrade-tar') >= 1
+          assert '/factory' not in s.split('define Device/sl_3000-emmc')[1].split('endef')[0]
+          s = io.open('target/linux/mediatek/filogic/base-files/etc/board.d/02_network', encoding='utf-8').read()
+          assert 'ucidef_set_interfaces_lan_wan "lan1 lan2 lan3" wan' in s
+          s = io.open('target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh', encoding='utf-8').read()
+          assert s.count('sl,3000') >= 2
+          print('✔ 设备块 / 网络 / 升级路径 全部就位')
+          PY
+          # 首启无线脚本（target 级 base-files，仅本机型构建会用到）
+          mkdir -p target/linux/mediatek/filogic/base-files/etc/uci-defaults
+          cat > target/linux/mediatek/filogic/base-files/etc/uci-defaults/97-sl3000-wifi <<'EOS'
+          #!/bin/sh
+          # SL-3000 首启：启用 2.4G + 5G 两个 radio 并建好 AP。
+          # OpenWrt 默认 wireless 是 disabled，不跑这段的话 LuCI「网络-无线」里看不到任何射频。
+          [ -f /etc/config/wireless ] || exit 0
+
+          set_radio() {
+          	idx="$1"; band="$2"; ssid="$3"; htmode="$4"
+          	uci -q set "wireless.radio${idx}.disabled=0"
+          	uci -q set "wireless.radio${idx}.country=CN"
+          	uci -q set "wireless.radio${idx}.htmode=${htmode}"
+          	# 2.4G 用 6 信道、5G 用 149（避开 DFS，开箱即用）
+          	if [ "$band" = "2g" ]; then
+          		uci -q set "wireless.radio${idx}.channel=6"
+          	else
+          		uci -q set "wireless.radio${idx}.channel=149"
+          	fi
+          }
+
+          # 按 band 给现有 wifi-iface 配名字；没有就新建一个
+          i=0
+          while uci -q get "wireless.@wifi-iface[${i}]" >/dev/null 2>&1; do
+          	dev=$(uci -q get "wireless.@wifi-iface[${i}].device")
+          	[ -n "$dev" ] || { i=$((i+1)); continue; }
+          	band=$(uci -q get "wireless.${dev}.band" || true)
+          	case "$band" in
+          		2g|2.4g|bg) idx=$(echo "$dev" | sed 's/[^0-9]//g'); set_radio "${idx:-0}" 2g "SL-3000-2.4G" HE40
+          		            uci -q set "wireless.@wifi-iface[${i}].ssid=SL-3000-2.4G" ;;
+          		5g|5ghz|a)  idx=$(echo "$dev" | sed 's/[^0-9]//g'); set_radio "${idx:-1}" 5g "SL-3000-5G" HE160
+          		            uci -q set "wireless.@wifi-iface[${i}].ssid=SL-3000-5G" ;;
+          	esac
+          	uci -q set "wireless.@wifi-iface[${i}].disabled=0"
+          	uci -q set "wireless.@wifi-iface[${i}].network=lan"
+          	i=$((i+1))
+          done
+
+          # radio0/radio1 兜底：无论上面的 iface 是否存在，都确保两个射频是启用的
+          for r in 0 1; do
+          	uci -q get "wireless.radio${r}" >/dev/null 2>&1 || continue
+          	uci -q set "wireless.radio${r}.disabled=0"
+          	uci -q set "wireless.radio${r}.country=CN"
+          done
+
+          uci -q commit wireless
+          wifi reload >/dev/null 2>&1 || true
+          logger -t sl3000-wifi "2.4G/5G radios enabled"
+          exit 0
+          EOS
+          sed -i 's/^          //' target/linux/mediatek/filogic/base-files/etc/uci-defaults/97-sl3000-wifi
+          chmod 755 target/linux/mediatek/filogic/base-files/etc/uci-defaults/97-sl3000-wifi
+          test -x target/linux/mediatek/filogic/base-files/etc/uci-defaults/97-sl3000-wifi
+
+      - name: 恢复 ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-sl3000-kwrt-${{ github.run_id }}
+          restore-keys: |
+            ccache-sl3000-kwrt-
+
+      - name: 生成基础 .config（目标机型 + 无线 + 主题/市场）
+        run: |
+          set -euo pipefail
+          cd openwrt
+          cat > .config <<'CFG'
+          CONFIG_TARGET_mediatek=y
+          CONFIG_TARGET_mediatek_filogic=y
+          CONFIG_TARGET_MULTI_PROFILE=y
+          CONFIG_TARGET_PER_DEVICE_ROOTFS=y
+          CONFIG_DEVEL=y
+          CONFIG_CCACHE=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-compat=y
+          CONFIG_PACKAGE_luci-lua-runtime=y
+          CONFIG_PACKAGE_libuci-lua=y
+          CONFIG_LUCI_LANG_zh_Hans=y
+          # 无线：mt7915e 驱动 + MT7981 固件（2.4G/5G 共用），wo-firmware 提供 offload
+          CONFIG_PACKAGE_kmod-mt7915e=y
+          CONFIG_PACKAGE_kmod-mt7981-firmware=y
+          CONFIG_PACKAGE_mt7981-wo-firmware=y
+          CONFIG_PACKAGE_wpad-basic-mbedtls=y
+          # eMMC / f2fs 支持（sysupgrade-tar 写 eMMC 需要）
+          CONFIG_PACKAGE_kmod-mmc=y
+          CONFIG_PACKAGE_kmod-fs-f2fs=y
+          CONFIG_PACKAGE_mkf2fs=y
+          CONFIG_PACKAGE_f2fsck=y
+          CONFIG_PACKAGE_losetup=y
+          CFG
+          sed -i 's/^          //' .config
+
+      - name: 主题 / iStore / 中文（沿用本仓库其他机型的 customize.sh）
+        run: |
+          # 部分仓库的 customize.sh 是 CRLF 行尾，直接执行会报 command not found
+          sed -i 's/\r$//' scripts/customize.sh
+          bash scripts/customize.sh openwrt
+
+      - name: 收敛到单一机型 + 校验（无线 / 设备块）
+        run: |
+          set -euo pipefail
+          cd openwrt
+          echo 'CONFIG_IMAGEOPT=y' >> .config
+          echo 'CONFIG_VERSIONOPT=y' >> .config
+          make defconfig
+
+          python3 - "$DEVICE" <<'PY'
+          import sys
+          keep = 'CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_' + sys.argv[1]
+          off, out = [], []
+          for line in open('.config', encoding='utf-8', errors='surrogateescape'):
+              name = line.split('=')[0].replace('# ', '').split(' ')[0]
+              if name.startswith('CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_') and name != keep:
+                  off.append(name)
+                  continue
+              out.append(line)
+          for n in dict.fromkeys(off):
+              out.append('# %s is not set\n' % n)
+          out.append('%s=y\n' % keep)
+          open('.config', 'w', encoding='utf-8', errors='surrogateescape').writelines(out)
+          print('已关闭非目标机型：%d 个' % len(off))
+          PY
+          echo "CONFIG_TARGET_MULTI_PROFILE=y" >> .config
+
+          if [ -f package/base-files/image-config.in ]; then
+            sed -i "s/^\(\s*\)default \"OpenWrt\"$/\1default \"$DIST\"/" package/base-files/image-config.in
+          fi
+          if grep -q '^CONFIG_KERNEL_DEBUG_INFO_BTF=y$' .config; then
+            sed -i 's/^CONFIG_KERNEL_DEBUG_INFO_BTF=y/# CONFIG_KERNEL_DEBUG_INFO_BTF is not set/' .config
+          fi
+          make defconfig
+          sed -i '/^CONFIG_VERSION_DIST=/d' .config
+          echo "CONFIG_VERSION_DIST=\"$DIST\"" >> .config
+
+          echo "===== 校验 ====="
+          grep -q "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${DEVICE}=y$" .config \
+            || { echo "::error::机型 ${DEVICE} 未生效"; exit 1; }
+          n_dev=$(grep -cE '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config || true)
+          [ "${n_dev:-0}" -eq 1 ] || { echo "::error::启用机型应为 1，实际 ${n_dev}"; exit 1; }
+          for k in kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware; do
+            grep -q "^CONFIG_PACKAGE_${k}=y$" .config || { echo "::error::无线包 ${k} 未选中"; exit 1; }
+          done
+          grep -q "^CONFIG_PACKAGE_luci-theme-${THEME}=y$" .config \
+            || echo "::warning::${THEME} 主题未在 .config 显式打开（以镜像包清单校验为准）"
+          grep -q '^CONFIG_PACKAGE_luci-app-store=y$' .config \
+            || { echo "::warning::iStore 未选中（部分仓库走 istore feed，可能用别的包名）"; }
+          echo "✔ 机型 / 无线 / 主题 / 市场 校验通过"
+
+      - name: 下载源码包
+        run: |
+          cd openwrt
+          make -j8 download < /dev/null || true
+          make -j1 download < /dev/null 2>&1 | tail -20 || true
+
+      - name: 编译固件
+        run: |
+          cd openwrt
+          export CCACHE_DIR CCACHE_MAXSIZE CCACHE_COMPRESS CCACHE_NOHASHDIR
+          mkdir -p "$CCACHE_DIR"
+          set -o pipefail
+          if make -j"$(nproc)" 2>&1 | tee build.log; then
+            echo ">>> ✅ 编译成功"
+          else
+            echo "::warning::并行编译失败，单线程复现"
+            fail="$(grep -o 'ERROR: [^ ]* failed to build' build.log | head -1 | awk '{print $2}')"
+            if [ -n "$fail" ]; then make -j1 V=s "$fail/compile" 2>&1 | tail -150 || true; else make -j1 V=s 2>&1 | tail -150 || true; fi
+            exit 1
+          fi
+
+      - name: 产物校验（只 sysupgrade + 无线包在镜像里）
+        run: |
+          set -uo pipefail
+          B=openwrt/bin/targets/mediatek/filogic
+          test -d "$B" || { echo "::error::没有 $B"; exit 1; }
+          echo "===== bin/targets ====="
+          ls -lh "$B" | head -30
+          miss=0
+          sysup=( "$B"/*sl_3000-emmc-squashfs-sysupgrade.bin )
+          [ "${#sysup[@]}" -eq 1 ] || { echo "  [FAIL] sysupgrade 数量 ${#sysup[@]}（应 1）"; miss=$((miss+1)); }
+          # 只要 sysupgrade：出现 factory 就报错
+          if ls "$B"/*sl_3000-emmc*factory* >/dev/null 2>&1; then
+            echo "  [FAIL] 出现了 factory 镜像（本机型不要 factory）"; miss=$((miss+1));
+          else
+            echo "  [ok] 无 factory 镜像"
+          fi
+          # DTB 是否真的编出来
+          if ls openwrt/build_dir/target-*/linux-*/image-mt7981b-sl-3000-emmc.dtb >/dev/null 2>&1; then
+            echo "  [ok] image-mt7981b-sl-3000-emmc.dtb 已生成"
+          else
+            echo "  [FAIL] 没生成 sl-3000-emmc 的 dtb"; miss=$((miss+1));
+          fi
+          KC=$(ls openwrt/build_dir/target-*/linux-*/.config 2>/dev/null | head -1)
+          if [ -n "$KC" ]; then
+            for k in CONFIG_MTK_ETH CONFIG_NET_DEVICES CONFIG_MT7915E; do
+              grep -q "^${k}=y$" "$KC" && echo "  [ok] $k" || { echo "  [FAIL] $k 未启用"; miss=$((miss+1)); }
+            done
+          else
+            echo "  [warn] 找不到内核 .config，跳过内核项校验"
+          fi
+          [ "$miss" -eq 0 ] || { echo "::error::产物校验失败 $miss 项"; exit 1; }
+          echo "✔ 产物校验通过"
+
+      - name: 收集产物（按 仓库前缀-版本-日期-机型 命名）
+        run: |
+          set -euo pipefail
+          B=openwrt/bin/targets/mediatek/filogic
+          mkdir -p out
+          shopt -s nullglob
+          DATE=$(TZ=Asia/Shanghai date +%Y%m%d)
+          sysup=( "$B"/*sl_3000-emmc-squashfs-sysupgrade.bin )
+          [ "${#sysup[@]}" -eq 1 ] || { echo "::error::sysupgrade 数量异常"; ls -lh "$B"; exit 1; }
+          cp -f "${sysup[0]}" "out/${PREFIX}-${VERSION}-${DATE}-sl3000-emmc-squashfs-sysupgrade.bin"
+
+          # 端到端包清单：无线驱动 / 主题 / 市场 / 中文 必须真的在 rootfs 里
+          PKGS=$(mktemp)
+          MANIFEST=$(ls "$B"/*sl_3000-emmc*.manifest 2>/dev/null | head -1 || true)
+          if [ -n "$MANIFEST" ]; then
+            awk '{print $1}' "$MANIFEST" | grep -v '^$' > "$PKGS" || true
+            echo "[info] 用 manifest 校验：$MANIFEST"
+          else
+            PKGDB=$(find openwrt/build_dir -maxdepth 5 -type f \( -path '*/apk/db/installed' -o -path '*/opkg/status' \) 2>/dev/null | head -1 || true)
+            if [ -n "$PKGDB" ]; then
+              case "$PKGDB" in
+                */apk/db/installed) sed -n 's/^P:\(.*\)$/\1/p' "$PKGDB" > "$PKGS" ;;
+                *) sed -n 's/^Package: \(.*\)$/\1/p' "$PKGDB" > "$PKGS" ;;
+              esac
+              echo "[info] 无 manifest，改用 rootfs 包数据库：$PKGDB"
+            fi
+          fi
+          if [ ! -s "$PKGS" ]; then
+            echo "::warning::拿不到包清单，跳过端到端包校验"
+          else
+            echo "===== 包清单校验（$(wc -l < "$PKGS") 个包）====="
+            miss=0
+            for k in kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware \
+                     luci-app-store "luci-theme-${THEME}" luci-i18n-base-zh-cn; do
+              if grep -qx "$k" "$PKGS"; then echo "  [ok] $k"; else echo "  [FAIL] 缺 $k"; miss=$((miss+1)); fi
+            done
+            if grep -qE '^(wpad-basic-mbedtls|wpad-openssl|wpad-mbedtls|wpad)$' "$PKGS"; then
+              echo "  [ok] wpad"
+            else
+              echo "  [FAIL] 缺 wpad（无线起不了 AP）"; miss=$((miss+1))
+            fi
+            # 2.4G/5G：mt7915e 一个驱动两个 phy，确认固件与 wo-firmware 都在
+            grep -qx 'kmod-mt7981-firmware' "$PKGS" || { echo "  [FAIL] 缺 MT7981 固件（5G 起不来）"; miss=$((miss+1)); }
+            [ "$miss" -eq 0 ] || { echo "::error::镜像包清单校验失败 $miss 项"; exit 1; }
+          fi
+
+          ( cd out && sha256sum ./* > sha256sums.txt )
+          ls -lh out
+          {
+            echo "## 🏗️ SL-3000（eMMC）编译完成"
+            echo ""
+            echo "- 源码：ImmortalWrt 官方 openwrt-24.10 + 本仓库设备补丁"
+            echo "- 机型：MT7981B + MT7976CN，1GB/512MB DDR（由 U-Boot 传参自动适配）"
+            echo "- 无线：首启启用 2.4G(HE40) + 5G(HE160)，AP 名 SL-3000-2.4G / SL-3000-5G"
+            echo "- 界面：${THEME} 主题 + iStore 市场 + 全量简体中文"
+            echo ""
+            echo "| 文件 | 大小 |"
+            echo "|---|---|"
+            ls -lh out | tail -n +2 | awk '{printf "| %s | %s |\n", $9, $5}'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-sl3000-kwrt
+          path: out/
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: 上传编译日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-sl3000-kwrt
+          path: |
+            openwrt/build.log
+            openwrt/.config
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: warn
+
+  release:
+    name: 📦 发布 kwrt-24.10-日期-sl3000
+    needs: build
+    if: ${{ always() && needs.build.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.make_release) }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 下载产物
+        uses: actions/download-artifact@v4
+        with:
+          name: images-sl3000-kwrt
+          path: rel
+
+      - name: 生成校验文件
+        run: |
+          cd rel
+          ls -lh
+          sha256sum ./* > sha256sums.txt
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          DATE=$(TZ=Asia/Shanghai date +%Y%m%d)
+          TAG="${PREFIX}-${VERSION}-${DATE}-sl3000"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            TAG="${TAG}-r${GITHUB_RUN_NUMBER}"
+          fi
+          cat > notes.md <<'EOF'
+          Kwrt 24.10（immortalwrt/openwrt-24.10）· SL-3000（司络）eMMC
+
+          - 机型：MT7981B + MT7976CN（WiFi6 AX3000，2x2 + 2x2），1GB / 512MB DDR 自适应
+          - 存储：32MB SPI-NOR（BL2 / u-boot-env / Factory / FIP）+ 128GB eMMC（rootfs）
+          - 网口：MT7531 switch，port0/1/2 -> lan1/lan2/lan3，port3 -> wan，port6 -> gmac0(2500base-x)
+          - 无线：mt7915e + MT7981 固件，首启即启用 2.4G（HE40，ch6）与 5G（HE160，ch149），
+            **默认无密码**，首次进 LuCI「网络 - 无线」改密码
+          - 界面：vantage 主题 + iStore 市场 + 全量简体中文 + 强制 zh_cn
+
+          ### 刷机（只要 sysupgrade）
+
+          1. 进 U-Boot Web 恢复页（或已有系统的 LuCI「系统 - 备份/刷写固件」）
+          2. 刷 `kwrt-24.10-<日期>-sl3000-emmc-squashfs-sysupgrade.bin`
+             （sysupgrade-tar 包，写入 eMMC 的 kernel/rootfs 分区）
+          3. 本机型**不提供 factory 镜像**，不要去找 factory。
+
+          ### 与上游移植的差异
+
+          1. 去掉 DTS 里写死的 512MB memory，512M / 1G 两版硬件都能识别全部内存
+          2. 02_network 单独写 `sl,3000*` -> `lan1 lan2 lan3` + `wan`
+             （上游塞进 routerich 组会把 WAN 配成 eth1，本机 WAN 是 DSA port@3）
+          3. platform.sh 的 do_upgrade 与 copy_config 都加了 `sl,3000*`（走 emmc_do_upgrade）
+          4. 新增首启无线脚本，开箱 2.4G / 5G 都可连
+          EOF
+          for i in 1 2 3 4 5; do
+            echo ">>> 第 $i 次上传"
+            if ! gh release view "$TAG" >/dev/null 2>&1; then
+              gh release create "$TAG" --title "Kwrt 24.10 · SL-3000 · ${DATE}" --notes-file notes.md || true
+            fi
+            if gh release upload "$TAG" rel/* --clobber; then
+              echo ">>> 上传成功（第 $i 次）"; exit 0
+            fi
+            sleep $((i * 30))
+          done
+          echo "::error::Release 上传失败，产物已保留在 Actions artifacts"
+          exit 1
