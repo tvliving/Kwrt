@@ -1,4 +1,4 @@
-# Kwrt · CMCC RAX3000M-e（AN8855 外挂交换机）专用构建
+# Kwrt · CMCC RAX3000M-e（MT7531 交换机）专用构建 —— 与 -v2（AN8855）并存
 #
 # 为什么用 openwrt master（6.18）而不是 24.10-6.6：AN8855 的 DSA 驱动与补丁只在
 # master（patches-6.18/737-net-dsa-add-Airoha-AN8855.patch、files-6.18/drivers/net/*an8855*）。
@@ -13,11 +13,11 @@
 #
 # 因此本 workflow：
 #  - 给 U-Boot 打补丁，保证 ethsys 的 FE reset controller 一定可用（并断言产物）；
-#  - 默认用 RAX3000Me 专用 DTS：关掉 MT7531 节点，让 AN8855 独占 reset GPIO；
-#    若你的机器其实是 MT7531 版，用 switch_dts=mt7531 触发即可。
+#  - 本版（文件名不带 -v2）默认 switch_dts=mt7531：保持上游 DTS 的双节点定义不动，
+#    适合交换机确实是 MT7531 的机器。AN8855 版请用文件名带 -v2 的那个 workflow。
 #
 # 产物：sysupgrade.itb + nand/ubi 的 bl31-uboot.fip（FIP 必须刷，否则分区布局不对）
-name: Kwrt RAX3000Me (AN8855) 编译
+name: Kwrt RAX3000Me (MT7531) 编译
 
 on:
   schedule:
@@ -35,7 +35,7 @@ on:
         options:
           - an8855
           - mt7531
-        default: an8855
+        default: mt7531
   push:
     branches: [25.12]
     paths:
@@ -55,7 +55,7 @@ env:
   VERSION: '6.18'
   THEME: vantage
   DEVICE: cmcc_rax3000m
-  SWITCH_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.switch_dts || 'an8855' }}
+  SWITCH_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.switch_dts || 'mt7531' }}
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   CCACHE_MAXSIZE: 1500M
   CCACHE_COMPRESS: 'true'
@@ -63,7 +63,7 @@ env:
 
 jobs:
   build:
-    name: 🏗️ RAX3000M-e (MT7981B + AN8855)
+    name: 🏗️ RAX3000M-e (MT7981B + MT7531)
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     steps:
@@ -231,7 +231,7 @@ jobs:
           grep -q 'CONFIGURE_ARGS += --without-selinux' package/utils/mtd-utils/Makefile \
             || { echo "::error::mtd-utils --without-selinux 补丁未生效"; exit 1; }
 
-      - name: 落地 RAX3000Me DTS（AN8855 独占 reset GPIO）
+      - name: 落地 RAX3000Me DTS（MT7531 版：保持上游双节点）
         run: |
           set -euo pipefail
           cd openwrt
@@ -670,7 +670,7 @@ jobs:
           ( cd out && sha256sum ./* > sha256sums.txt )
           ls -lh out
           {
-            echo "## 🏗️ RAX3000M-e（AN8855）编译完成"
+            echo "## 🏗️ RAX3000M-e（MT7531）编译完成"
             echo ""
             echo "- 交换机 DTS 方案：\`$SWITCH_MODE\`"
             echo "- U-Boot：FE reset 已可用，交换机 auto 探测（含 an8855 驱动）"
@@ -730,10 +730,10 @@ jobs:
             TAG="${TAG}-r${GITHUB_RUN_NUMBER}"
           fi
           cat > notes.md <<'EOF'
-          Kwrt 6.18（openwrt master）· CMCC RAX3000M-e · AN8855 外挂交换机
+          Kwrt 6.18（openwrt master）· CMCC RAX3000M-e · MT7531 交换机
 
-          - 机型：MT7981B + AN8855（3x GbE LAN + 1x 2.5G 上行到 gmac0）；WAN 走 gmac1
-          - 网口：AN8855 port0/1/2 → lan3/lan2/lan1，port5 → gmac0(2500base-x)
+          - 机型：MT7981B + MT7531（3x GbE LAN）；WAN 走 gmac1
+          - 网口：MT7531 port0/1/2 → lan3/lan2/lan1（上游默认布局）
           - 无线：mt7915e，首启双频 AP `RAX3000ME-2.4G / RAX3000ME-5G`（CN、5G HE160、2.4G HE40）
           - 界面：vantage + iStore 市场 + 全量简体中文 + 强制 zh_cn
           - 产物（只发本机 3 件）：`*-cmcc_rax3000me-squashfs-sysupgrade.itb` +
@@ -747,10 +747,10 @@ jobs:
              没有交换机探测、MAC 全 0，所以 TTL 进 U-Boot 也 TFTP 不了。
              本版在 U-Boot 里补了 FE reset 兜底，并在构建时硬校验
              `DM_RESET / RESET_MEDIATEK / MTK_ETH_SWITCH_AN8855` 与 dtb 里的 `reset-names="fe"`。
-          2. `an8855: Couldn't get our reset line / probe failed -16`
-             上游 DTS 里 MT7531 和 AN8855 都声明了 `reset-gpios = <&pio 39>`，先 probe 的占住 GPIO。
-             本版改用 `mt7981b-cmcc-rax3000me.dts`，把 MT7531 节点 `status = "disabled"`，
-             AN8855 独占 reset，lan1-3 才能起来。
+          2. 本版是 **MT7531 版**（默认 `switch_dts=mt7531`）：保持上游 DTS 的双节点定义，
+             MT7531 节点 `status` 不动。AN8855 版本请用 `*-rax3000me-v2` 那个 workflow。
+             注意：MT7531 与 AN8855 在上游 DTS 里都声明 `reset-gpios = <&pio 39>`，
+             若你的机器实际是 AN8855，必须用 v2，否则 an8855 会 -EBUSY。
 
           ### 刷机步骤
 

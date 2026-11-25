@@ -1,0 +1,779 @@
+# Kwrt · CMCC RAX3000M-e V2（AN8855 外挂交换机）专用构建
+#
+# 为什么用 openwrt master（6.18）而不是 24.10-6.6：AN8855 的 DSA 驱动与补丁只在
+# master（patches-6.18/737-net-dsa-add-Airoha-AN8855.patch、files-6.18/drivers/net/*an8855*）。
+#
+# 串口日志定位到的两个真实故障（2026-11-24）：
+#  1) U-Boot：`error: Unable to get reset ctrl for frame engine` → mtk_eth 的
+#     reset_get_by_name(dev,"fe") 失败 → probe 直接 return → 没有 Net 初始化、
+#     没有交换机探测、MAC 全 0 → TFTP 不可用（不是交换机没驱动，是 GMAC 没起来）。
+#  2) 内核：`an8855 mdio-bus:01: Couldn't get our reset line / probe failed -16`
+#     → 上游 DTS 同时声明了 MT7531（switch@1f）和 AN8855，两者都声明
+#     reset-gpios = <&pio 39>，先 probe 的占住 GPIO，AN8855 就 -EBUSY，lan1-3 全废。
+#
+# 因此本 workflow：
+#  - 给 U-Boot 打补丁，保证 ethsys 的 FE reset controller 一定可用（并断言产物）；
+#  - 本版（V2）默认 switch_dts=an8855：关掉 MT7531 节点，让 AN8855 独占 reset GPIO；
+#    若你的机器其实是 MT7531 版，请用文件名不带 -v2 的那个 workflow。
+#
+# 产物：sysupgrade.itb + nand/ubi 的 bl31-uboot.fip（FIP 必须刷，否则分区布局不对）
+name: Kwrt RAX3000Me V2 (AN8855) 编译
+
+on:
+  schedule:
+    # 北京时间每周一 08:30 = UTC 00:30
+    - cron: '30 0 * * 1'
+  workflow_dispatch:
+    inputs:
+      make_release:
+        description: '编译完成后发布 Release'
+        type: boolean
+        default: true
+      switch_dts:
+        description: '交换机方案：an8855（本机，禁用 MT7531 节点）/ mt7531（保持上游双节点）'
+        type: choice
+        options:
+          - an8855
+          - mt7531
+        default: an8855
+  push:
+    branches: [25.12]
+    paths:
+      - '.github/workflows/kwrt-rax3000me-v2.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rax3000me-v2
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Shanghai
+  DIST: Kwrt
+  PREFIX: kwrt
+  VERSION: '6.18'
+  THEME: vantage
+  DEVICE: cmcc_rax3000m
+  SWITCH_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.switch_dts || 'an8855' }}
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 1500M
+  CCACHE_COMPRESS: 'true'
+  CCACHE_NOHASHDIR: 'true'
+
+jobs:
+  build:
+    name: 🏗️ RAX3000M-e V2 (MT7981B + AN8855)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - name: 检出构建仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 释放磁盘空间并加大 swap
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache /usr/local/share/boost \
+                      /usr/local/lib/node_modules /usr/lib/jvm \
+                      /usr/share/swift /usr/share/miniconda /usr/share/rust \
+                      /usr/share/kotlinc /usr/share/gradle-* /opt/az \
+                      /opt/microsoft /usr/local/aws-cli /usr/local/.ghcup \
+                      /etc/mysql /etc/php /usr/local/go /opt/pipx 2>/dev/null || true
+          sudo systemctl stop docker docker.socket containerd 2>/dev/null || true
+          sudo rm -rf /var/lib/docker /var/lib/containerd 2>/dev/null || true
+          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* 2>/dev/null || true
+          sudo apt-get clean 2>/dev/null || true
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /swapfile 2>/dev/null || true
+          if sudo fallocate -l 4G /swapfile 2>/dev/null; then
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile >/dev/null 2>&1 && sudo swapon /swapfile
+          fi
+          df -h / | tail -1
+          free -h
+
+      - name: 安装编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get update -qq -o Acquire::Retries=3 || sudo -E apt-get update -qq
+          sudo -E apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev libelf-dev python3-setuptools \
+            rsync swig unzip zlib1g-dev file wget dwarves llvm python3-pyelftools \
+            libpython3-dev aria2 jq ccache rename device-tree-compiler \
+            libgmp3-dev libmpc-dev pahole libdw-dev zstd \
+            autoconf automake autopoint binutils bzip2 cpio curl genisoimage \
+            gperf haveged help2man intltool libc6-dev-i386 libfuse-dev \
+            libglib2.0-dev libltdl-dev libmpfr-dev libncurses-dev \
+            libncursesw5-dev libreadline-dev libtool libxslt1-dev lrzsz \
+            ninja-build p7zip p7zip-full patch pkgconf python3-ply \
+            python3-docutils qemu-utils scons squashfs-tools subversion texinfo \
+            uglifyjs upx-ucl vim xxd
+          sudo timedatectl set-timezone "Asia/Shanghai"
+          ccache --version | head -1 || true
+
+      - name: 准备源码树（openwrt master / 6.18：AN8855 驱动在这里）
+        run: |
+          rm -rf openwrt .owrt-src
+          for i in 1 2 3; do
+            git clone -q --depth 1 -b master https://github.com/openwrt/openwrt .owrt-src && break
+            echo "::warning::clone 第 $i 次失败，重试"
+            rm -rf .owrt-src
+            sleep 10
+          done
+          [ -d .owrt-src ] || { echo "::error::上游源码克隆失败"; exit 1; }
+          mv .owrt-src openwrt
+          echo ">>> 源码树：$(cd openwrt && git rev-parse --short HEAD)（$(cd openwrt && git log -1 --format=%cd --date=short)）"
+
+      - name: 修补 U-Boot（FE reset 必须可用，否则 FIP 里 GMAC 起不来）
+        run: |
+          set -euo pipefail
+          cd openwrt/package/boot/uboot-mediatek/patches
+
+          # 串口日志：mtk_eth 的 reset_get_by_name(dev,"fe") 失败会直接 return，
+          # 后面 Net 初始化 / 交换机探测全都不执行 → 没有 IP、无法 TFTP。
+          # 补丁内容（base64，避免 YAML 缩进把 diff 里的 tab 吃掉）：
+          #   - ethsys reset provider 没绑上时，直接按 ETHSYS_HIFSYS_RST_CTRL(0x34)
+          #     的 FE 位（ETHSYS_FE_RST = bit6）做 assert/deassert
+          #   - mtk_eth_start() 里对 rst_fe 的断言加存在性判断，避免空指针
+          base64 -d > 445-net-mtk_eth-fe-reset-fallback.patch <<'B64'
+          LS0tIGEvZHJpdmVycy9uZXQvbXRrX2V0aC9tdGtfZXRoLmMJMjAyNi0xMS0yNCAxNDoxMTowMS4xMTY0NjQyMDAgKzA4MDAKKysrIGIvZHJpdmVycy9uZXQvbXRrX2V0aC9tdGtfZXRoLmMJMjAyNi0xMS0yNCAxNDoxMTowMS4yMDk3NzQyMDAgKzA4MDAKQEAgLTEwNDMsMTAgKzEwNDMsMTIgQEAKIAlpbnQgaSwgcmV0OwogCiAJLyogUmVzZXQgRkUgKi8KLQlyZXNldF9hc3NlcnQoJnByaXYtPnJzdF9mZSk7Ci0JdWRlbGF5KDEwMDApOwotCXJlc2V0X2RlYXNzZXJ0KCZwcml2LT5yc3RfZmUpOwotCW1kZWxheSgxMCk7CisJaWYgKHByaXYtPnJzdF9mZS5kZXYpIHsKKwkJcmVzZXRfYXNzZXJ0KCZwcml2LT5yc3RfZmUpOworCQl1ZGVsYXkoMTAwMCk7CisJCXJlc2V0X2RlYXNzZXJ0KCZwcml2LT5yc3RfZmUpOworCQltZGVsYXkoMTApOworCX0KIAogCWlmIChNVEtfSEFTX0NBUFMocHJpdi0+c29jLT5jYXBzLCBNVEtfTkVUU1lTX1YyKSB8fAogCSAgICBNVEtfSEFTX0NBUFMocHJpdi0+c29jLT5jYXBzLCBNVEtfTkVUU1lTX1YzKSkKQEAgLTEzMzEsOCArMTMzMywxNyBAQAogCS8qIFJlc2V0IGNvbnRyb2xsZXJzICovCiAJcmV0ID0gcmVzZXRfZ2V0X2J5X25hbWUoZGV2LCAiZmUiLCAmcHJpdi0+cnN0X2ZlKTsKIAlpZiAocmV0KSB7Ci0JCXByaW50ZigiZXJyb3I6IFVuYWJsZSB0byBnZXQgcmVzZXQgY3RybCBmb3IgZnJhbWUgZW5naW5lXG4iKTsKLQkJcmV0dXJuIHJldDsKKwkJLyoKKwkJICogZXRoc3lzIOeahCByZXNldCBwcm92aWRlciDmnInlj6/og73msqHlnKggRE0g5omr5o+P6Zi25q6157uR5LiK77yIbWVkaWF0ZWtfcmVzZXRfYmluZAorCQkgKiDlpLHotKXml7blj6rmiZMgZGVidWcg5pel5b+X77yJ77yM5q2k5aSEIHJlc2V0X2dldF9ieV9uYW1lIOi/lOWbniAtRU5PREVW44CCCisJCSAqIOebtOaOpeWGmSBFVEhTWVNfSElGU1lTX1JTVF9DVFJMKDB4MzQpIOeahCBGRSDkvY3vvIhFVEhTWVNfRkVfUlNUID0gYml0Nu+8iQorCQkgKiDlgZrkuIDmrKEgYXNzZXJ0L2RlYXNzZXJ077yM6YG/5YWN5pW05Z2XIEdNQUMg5LiN5Y+v55So44CBVS1Cb290IOmHjOW9u+W6leayoeaciee9kee7nOOAggorCQkgKi8KKwkJcHJpbnRmKCJ3YXJuOiBubyBmZSByZXNldCBjdHJsLCBmYWxsIGJhY2sgdG8gZXRoc3lzIHJzdHIgY3RybFxuIik7CisJCXJlZ21hcF91cGRhdGVfYml0cyhwcml2LT5ldGhzeXNfcmVnbWFwLCAweDM0LCBCSVQoNiksIEJJVCg2KSk7CisJCXVkZWxheSgxMDAwKTsKKwkJcmVnbWFwX3VwZGF0ZV9iaXRzKHByaXYtPmV0aHN5c19yZWdtYXAsIDB4MzQsIEJJVCg2KSwgMCk7CisJCW1kZWxheSgxMCk7CiAJfQogCiAJcHJpdi0+Z21hY19pZCA9IGRldl9yZWFkX3UzMl9kZWZhdWx0KGRldiwgIm1lZGlhdGVrLGdtYWMtaWQiLCAwKTsK
+          B64
+          sed -i 's/^          //' 445-net-mtk_eth-fe-reset-fallback.patch
+          head -5 445-net-mtk_eth-fe-reset-fallback.patch
+          grep -q 'fall back to ethsys rstr ctrl' 445-net-mtk_eth-fe-reset-fallback.patch \
+            || { echo "::error::U-Boot 补丁内容不对"; exit 1; }
+          echo ">>> 已写入 445-net-mtk_eth-fe-reset-fallback.patch"
+
+      - name: 修补上游 libsepol / libselinux 3.10 的 InstallDev（公共头与 .pc）
+        run: |
+          set -euo pipefail
+          cd openwrt
+          python3 - <<'PY'
+          import io
+
+          # 上游 openwrt master 的 libsepol / libselinux 都是 3.10，InstallDev 统一从
+          # $(PKG_INSTALL_DIR)/usr/include/* 与 usr/lib/pkgconfig/<name>.pc 取文件。
+          # 但 3.10 的 make install 并不稳定地把公共头落地：
+          #   libsepol 公共头在 include/sepol（src/*.h 全是私有头，没有 sepol.h）
+          #   libselinux 公共头在 include/selinux
+          #   .pc 由 make all 生成在 src/<name>.pc
+          # 只修 libsepol 会先报 sepol/sepol.h: No such file or directory，
+          # 修完后 libselinux 的 InstallDev 又以同样方式失败。两个包一起修：
+          # 原 ipkg-install 拷贝保留但吞掉缺失错误，再无条件从构建目录补全套公共头/.pc。
+          def fix(path, name, hdr):
+              s = io.open(path, encoding='utf-8').read()
+              old_hdr = '\t$(CP) $(PKG_INSTALL_DIR)/usr/include/* $(1)/usr/include/'
+              new_hdr = ('\t$(CP) $(PKG_INSTALL_DIR)/usr/include/* $(1)/usr/include/ 2>/dev/null || true\n'
+                         '\t$(CP) $(PKG_BUILD_DIR)/%s $(1)/usr/include/' % hdr)
+              old_pc = ('\t$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/lib/pkgconfig/%s.pc '
+                        '$(1)/usr/lib/pkgconfig/') % name
+              new_pc = ('\t$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/lib/pkgconfig/%s.pc '
+                        '$(1)/usr/lib/pkgconfig/ 2>/dev/null || true\n'
+                        '\t$(INSTALL_DATA) $(PKG_BUILD_DIR)/src/%s.pc '
+                        '$(1)/usr/lib/pkgconfig/') % (name, name)
+              n = 0
+              if old_hdr in s:
+                  s = s.replace(old_hdr, new_hdr, 1)
+                  n += 1
+              if old_pc in s:
+                  s = s.replace(old_pc, new_pc, 1)
+                  n += 1
+              io.open(path, 'w', encoding='utf-8').write(s)
+              print('>>> %s: patched %d places (headers + .pc)' % (name, n))
+              return n
+
+          a = fix('package/libs/libsepol/Makefile', 'libsepol', 'include/sepol')
+          b = fix('package/libs/libselinux/Makefile', 'libselinux', 'include/selinux')
+          # libselinux 3.10 的 utils/Makefile 用 `-lsepol` 链接 sefcontext_compile，
+          # 但 OpenWrt master 的 TARGET_LDFLAGS 不含 -L$(STAGING_DIR)/usr/lib，
+          # 现存的那个 -L 又出现在 -lsepol 之后，链接器从左到右解析时找不到 libsepol。
+          p = 'package/libs/libselinux/Makefile'
+          s = io.open(p, encoding='utf-8').read()
+          line = 'TARGET_LDFLAGS += -L$(STAGING_DIR)/usr/lib'
+          if line not in s and 'define Build/Compile' in s:
+              s = s.replace('define Build/Compile', line + '\n\n' + 'define Build/Compile', 1)
+              io.open(p, 'w', encoding='utf-8').write(s)
+              print('>>> libselinux: added TARGET_LDFLAGS -L staging/usr/lib')
+          # 3.10 的 make install 落库路径不稳，InstallDev 再从构建目录兜底拷静态库
+          p = 'package/libs/libsepol/Makefile'
+          s = io.open(p, encoding='utf-8').read()
+          needle = '\t$(CP) $(PKG_INSTALL_DIR)/usr/lib/* $(1)/usr/lib/'
+          add = (needle + ' 2>/dev/null || true\n'
+                 '\t$(CP) $(PKG_BUILD_DIR)/src/libsepol.a $(1)/usr/lib/ 2>/dev/null || true')
+          if needle in s and add not in s:
+              s = s.replace(needle, add, 1)
+              io.open(p, 'w', encoding='utf-8').write(s)
+              print('>>> libsepol: staged libsepol.a fallback from build dir')
+          # mtd-utils configure 探测到 staging 的 libselinux.pc 会自动打开
+          # SELinux 支持并链接 -lselinux；但 3.9/3.10 的 InstallDev 不落
+          # libselinux.so，mkfs.ubifs 链接报 cannot find -lselinux。本固件
+          # 不需要 SELinux xattr，显式关闭这个可选探测。
+          p = 'package/utils/mtd-utils/Makefile'
+          s = io.open(p, encoding='utf-8').read()
+          anchor = 'include $(INCLUDE_DIR)/package.mk'
+          line = 'CONFIGURE_ARGS += --without-selinux'
+          if line not in s and anchor in s:
+              s = s.replace(anchor, anchor + '\n' + line, 1)
+              io.open(p, 'w', encoding='utf-8').write(s)
+              print('>>> mtd-utils: --without-selinux (libselinux.pc auto-probe)')
+          if a != 2 or b != 2:
+              raise SystemExit('::error::libsepol/libselinux InstallDev patch incomplete')
+          PY
+          grep -q 'PKG_BUILD_DIR)/include/sepol' package/libs/libsepol/Makefile \
+            || { echo "::error::libsepol 公共头补丁未生效"; exit 1; }
+          grep -q 'PKG_BUILD_DIR)/src/libselinux.pc' package/libs/libselinux/Makefile \
+            || { echo "::error::libselinux .pc 补丁未生效"; exit 1; }
+          grep -q 'CONFIGURE_ARGS += --without-selinux' package/utils/mtd-utils/Makefile \
+            || { echo "::error::mtd-utils --without-selinux 补丁未生效"; exit 1; }
+
+      - name: 落地 RAX3000Me DTS（AN8855 独占 reset GPIO）
+        run: |
+          set -euo pipefail
+          cd openwrt
+          dts=target/linux/mediatek/dts/mt7981b-cmcc-rax3000me.dts
+          if [ "$SWITCH_MODE" = "an8855" ]; then
+            cat > "$dts" <<'DTS'
+          // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+          /*
+           * CMCC RAX3000Me —— AN8855 外挂交换机版本
+           *
+           * 与 RAX3000M 共用基础 DTS，但本机没有 MT7531。上游 DTS 里 MT7531 与 AN8855
+           * 都写了 reset-gpios = <&pio 39>，谁先 probe 谁占住 GPIO，另一个必然 -EBUSY：
+           *   内核日志 “an8855 mdio-bus:01: Couldn't get our reset line / probe failed -16”
+           * 所以这里把 MT7531 节点关掉（只改 status，不删节点，避免 &switch 标签悬空），
+           * 让 AN8855 独占 reset GPIO，lan1-3 才能起来。
+           */
+          /dts-v1/;
+          #include "mt7981b-cmcc-rax3000m.dts"
+          
+          / {
+          	model = "CMCC RAX3000Me";
+          };
+          
+          &switch {
+          	status = "disabled";
+          };
+          DTS
+          else
+            cat > "$dts" <<'DTS'
+          // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+          /* CMCC RAX3000Me —— MT7531 版本：保持上游双节点定义不动 */
+          /dts-v1/;
+          #include "mt7981b-cmcc-rax3000m.dts"
+          
+          / {
+          	model = "CMCC RAX3000Me";
+          };
+          DTS
+          fi
+          sed -i 's/^          //' "$dts"
+          test -s "$dts" || { echo "::error::RAX3000Me DTS 未生成"; exit 1; }
+
+          # device 块改用本机型 DTS（compatible 仍保持 cmcc,rax3000m，
+          # 这样 board.d/02_network、platform.sh、uboot-envtools 都不用改）
+          python3 - <<'PY'
+          import io, re, sys
+          p = 'target/linux/mediatek/image/filogic.mk'
+          s = io.open(p, encoding='utf-8').read()
+          i = s.index('define Device/cmcc_rax3000m\n')
+          j = s.index('endef\n', i)
+          blk = s[i:j]
+          if 'mt7981b-cmcc-rax3000me' not in blk:
+              blk2 = blk.replace('DEVICE_DTS := mt7981b-cmcc-rax3000m\n',
+                                 'DEVICE_DTS := mt7981b-cmcc-rax3000me\n', 1)
+              assert blk2 != blk, 'cmcc_rax3000m 里找不到 DEVICE_DTS 行'
+              s = s[:i] + blk2 + s[j:]
+              io.open(p, 'w', encoding='utf-8').write(s)
+          print('>>> DEVICE_DTS 已切到 mt7981b-cmcc-rax3000me')
+          PY
+          grep -q 'DEVICE_DTS := mt7981b-cmcc-rax3000me' target/linux/mediatek/image/filogic.mk \
+            || { echo "::error::DEVICE_DTS 未切换"; exit 1; }
+
+      - name: 校验 AN8855 / reset GPIO 配置（缺一即失败）
+        run: |
+          set -euo pipefail
+          cd openwrt
+          dts=target/linux/mediatek/dts/mt7981b-cmcc-rax3000m.dts
+          test -f "$dts" || { echo "::error::缺 $dts"; exit 1; }
+          for k in 'airoha,an8855-mfd' 'airoha,an8855-switch' 'airoha,an8855-mdio' 'airoha,an8855-efuse'; do
+            grep -q "$k" "$dts" || { echo "::error::上游 DTS 缺 $k"; exit 1; }
+          done
+          grep -q 'ethernet = <&gmac0>' "$dts" || { echo "::error::AN8855 没接 gmac0"; exit 1; }
+          # reset GPIO 只能有一个控制器在抢：an8855 那份必须存在
+          n=$(grep -c 'reset-gpios = <&pio 39' "$dts" || true)
+          echo ">>> upstream DTS 里 reset-gpios(pio39) 声明数：$n"
+          if [ "$SWITCH_MODE" = "an8855" ]; then
+            grep -q 'status = "disabled"' target/linux/mediatek/dts/mt7981b-cmcc-rax3000me.dts \
+              || { echo "::error::AN8855 模式必须禁用 MT7531 节点"; exit 1; }
+          else
+            if grep -q 'status = "disabled"' target/linux/mediatek/dts/mt7981b-cmcc-rax3000me.dts; then
+              echo "::error::MT7531 模式不应禁用 MT7531 节点"; exit 1
+            fi
+          fi
+          test -f target/linux/mediatek/files-6.18/drivers/net/dsa/an8855.c \
+            || { echo "::error::缺 AN8855 DSA 驱动"; exit 1; }
+          ls target/linux/mediatek/patches-6.18/ | grep -q 'Airoha-AN8855' \
+            || { echo "::error::缺 AN8855 内核补丁"; exit 1; }
+          echo "✔ AN8855（DTS + 内核驱动 + reset GPIO 独占）校验通过（模式 $SWITCH_MODE）"
+
+      - name: 恢复 ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-rax3000me-v2-${{ github.run_id }}
+          restore-keys: |
+            ccache-rax3000me-v2-
+
+      - name: 生成基础 .config（RAX3000M + vantage + iStore + 强制中文）
+        run: |
+          set -euo pipefail
+          cd openwrt
+          cat > .config <<'CFG'
+          CONFIG_TARGET_mediatek=y
+          CONFIG_TARGET_mediatek_filogic=y
+          CONFIG_TARGET_MULTI_PROFILE=y
+          CONFIG_TARGET_PER_DEVICE_ROOTFS=y
+          CONFIG_DEVEL=y
+          CONFIG_CCACHE=y
+          # 本 workflow 克隆上游 openwrt master，DEFAULT_PACKAGES 不含 luci；
+          # e5d713e36 重建文件时误删了 6dcc7d9c 加的这一行，导致 uhttpd 未选中。
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-app-store=y
+          CONFIG_PACKAGE_luci-lib-taskd=y
+          CONFIG_PACKAGE_luci-lib-xterm=y
+          CONFIG_PACKAGE_taskd=y
+          CONFIG_PACKAGE_libuci-lua=y
+          CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_tar=y
+          CONFIG_PACKAGE_mount-utils=y
+          CONFIG_PACKAGE_xz=y
+          CONFIG_PACKAGE_xz-utils=y
+          CONFIG_PACKAGE_liblzma=y
+          CONFIG_PACKAGE_luci-compat=y
+          CONFIG_PACKAGE_luci-lua-runtime=y
+          CONFIG_LUCI_LANG_zh_Hans=y
+          # luci-app-store 依赖 !(TAR_XZ) || xz-utils，tar 会强制打开 TAR_XZ，这里补 xz-utils
+          # CONFIG_PACKAGE_TAR_XZ is not set
+          CFG
+          sed -i 's/^          //' .config
+
+      - name: 主题 / iStore / 中文（沿用本仓库其他机型的 customize.sh）
+        run: |
+          # 部分仓库的 customize.sh 是 CRLF 行尾，直接执行会报 command not found
+          sed -i 's/\r$//' scripts/customize.sh
+          bash scripts/customize.sh openwrt
+
+      - name: 收敛到 RAX3000M + 校验
+        run: |
+          set -euo pipefail
+          cd openwrt
+          echo 'CONFIG_IMAGEOPT=y' >> .config
+          echo 'CONFIG_VERSIONOPT=y' >> .config
+          make defconfig
+
+          python3 - "$DEVICE" <<'PY'
+          import sys
+          keep = 'CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_' + sys.argv[1]
+          off, out = [], []
+          for line in open('.config', encoding='utf-8', errors='surrogateescape'):
+              name = line.split('=')[0].replace('# ', '').split(' ')[0]
+              if name.startswith('CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_') and name != keep:
+                  off.append(name)
+                  continue
+              out.append(line)
+          for n in dict.fromkeys(off):
+              out.append('# %s is not set\n' % n)
+          out.append('%s=y\n' % keep)
+          open('.config', 'w', encoding='utf-8', errors='surrogateescape').writelines(out)
+          print('已关闭非目标机型：%d 个' % len(off))
+          PY
+          echo "CONFIG_TARGET_MULTI_PROFILE=y" >> .config
+
+          if [ -f package/base-files/image-config.in ]; then
+            sed -i "s/^\(\s*\)default \"OpenWrt\"$/\1default \"$DIST\"/" package/base-files/image-config.in
+          fi
+          if grep -q '^CONFIG_KERNEL_DEBUG_INFO_BTF=y$' .config; then
+            sed -i 's/^CONFIG_KERNEL_DEBUG_INFO_BTF=y/# CONFIG_KERNEL_DEBUG_INFO_BTF is not set/' .config
+          fi
+          make defconfig
+          sed -i '/^CONFIG_VERSION_DIST=/d' .config
+          echo "CONFIG_VERSION_DIST=\"$DIST\"" >> .config
+
+          echo "===== 校验 ====="
+          grep -q "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${DEVICE}=y$" .config \
+            || { echo "::error::机型 ${DEVICE} 未生效"; exit 1; }
+          n_dev=$(grep -cE '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y$' .config || true)
+          [ "${n_dev:-0}" -eq 1 ] || { echo "::error::启用机型应为 1，实际 ${n_dev}"; exit 1; }
+          grep -q "^CONFIG_VERSION_DIST=\"$DIST\"$" .config || { echo "::error::发行名未生效"; exit 1; }
+
+          if ! grep -q '^CONFIG_PACKAGE_luci-app-store=y$' .config; then
+            echo "::warning::iStore 首次未生效，重试一次"
+            ./scripts/feeds install -f -p istore luci-app-store || true
+            ./scripts/feeds install -f -p istore luci-lib-taskd || true
+            printf 'CONFIG_PACKAGE_xz=y\nCONFIG_PACKAGE_xz-utils=y\nCONFIG_PACKAGE_liblzma=y\nCONFIG_PACKAGE_luci-lua-runtime=y\nCONFIG_PACKAGE_luci-app-store=y\n' >> .config
+            make defconfig
+          fi
+          grep -q '^CONFIG_PACKAGE_luci-app-store=y$' .config || { echo "::error::iStore 市场未生效"; exit 1; }
+          grep -q "^CONFIG_PACKAGE_luci-theme-${THEME}=y$" .config || { echo "::error::主题 ${THEME} 未生效"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_luci-i18n-base-zh-cn=y$' .config || { echo "::error::中文基础包未生效"; exit 1; }
+          grep -q '^CONFIG_LUCI_LANG_zh_Hans=y$' .config || { echo "::error::中文开关未开启"; exit 1; }
+          if ! grep -q '^CONFIG_PACKAGE_uhttpd=y$' .config; then
+            echo "::warning::uhttpd 未选中，补写 luci/uhttpd 后重建配置"
+            grep -nE '^#? ?CONFIG_PACKAGE_(luci|luci-light|uhttpd)=' .config | head -10 || true
+            printf 'CONFIG_PACKAGE_luci=y\nCONFIG_PACKAGE_uhttpd=y\n' >> .config
+            make defconfig
+          fi
+          grep -q '^CONFIG_PACKAGE_uhttpd=y$' .config || { echo "::error::uhttpd 未选中"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_dropbear=y$' .config || { echo "::error::dropbear 未选中"; exit 1; }
+          grep -qE '^CONFIG_PACKAGE_(wpad-basic-mbedtls|wpad-openssl|wpad-mbedtls|wpad)=y$' .config \
+            || { echo "::error::wpad 未选中，无线起不了 AP"; exit 1; }
+
+          # 首启双频无线：按 band 判断（不写死 path/phy），SSID 用本机型名
+          mkdir -p files/etc/uci-defaults
+          cat > files/etc/uci-defaults/97-rax3000me-wifi <<'EOS'
+          #!/bin/sh
+          SSID_BASE='RAX3000ME'
+          i=0
+          while [ "$i" -lt 10 ]; do
+          	[ -n "$(ls -A /sys/class/ieee80211 2>/dev/null)" ] && break
+          	i=$((i + 1)); sleep 1
+          done
+          [ -f /etc/config/wireless ] || wifi config >/dev/null 2>&1 || true
+          [ -f /etc/config/wireless ] || exit 0
+          uci -q show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p' | while read -r r; do
+          	[ -n "$r" ] || continue
+          	band=$(uci -q get "wireless.$r.band")
+          	if [ -z "$band" ]; then
+          		case "$(uci -q get "wireless.$r.hwmode")" in
+          			11a|11ac|11ax|11be) band=5g ;;
+          			*) band=2g ;;
+          		esac
+          	fi
+          	suffix=2.4G
+          	[ "$band" = "5g" ] && suffix=5G
+          	[ "$band" = "6g" ] && suffix=6G
+          	uci -q set "wireless.$r.disabled=0"
+          	uci -q set "wireless.$r.country=CN"
+          	uci -q set "wireless.$r.ieee80211d=1"
+          	case "$band" in
+          		2g) uci -q set "wireless.$r.htmode=HE40" ;;
+          		*)  uci -q set "wireless.$r.channel=auto"; uci -q set "wireless.$r.htmode=HE160" ;;
+          	esac
+          	uci -q commit wireless
+          	idx=0
+          	while uci -q get "wireless.@wifi-iface[$idx]" >/dev/null 2>&1; do
+          		if [ "$(uci -q get "wireless.@wifi-iface[$idx].device")" = "$r" ]; then
+          			uci -q set "wireless.@wifi-iface[$idx].ssid=${SSID_BASE}-${suffix}"
+          			uci -q set "wireless.@wifi-iface[$idx].network=lan"
+          			uci -q set "wireless.@wifi-iface[$idx].disabled=0"
+          		fi
+          		idx=$((idx + 1))
+          	done
+          	uci -q commit wireless
+          done
+          exit 0
+          EOS
+          sed -i 's/^          //' files/etc/uci-defaults/97-rax3000me-wifi
+          chmod 755 files/etc/uci-defaults/97-rax3000me-wifi
+          test -x files/etc/uci-defaults/97-rax3000me-wifi || { echo "::error::无线脚本缺失"; exit 1; }
+          echo "机型 $DEVICE（RAX3000Me，$SWITCH_MODE）/ 主题 $THEME / iStore + 中文 / 双频无线首启启用"
+
+      - name: 下载源码包
+        run: |
+          cd openwrt
+          make -j8 download < /dev/null || true
+          make -j1 download < /dev/null 2>&1 | tail -20 || true
+
+      - name: 编译固件
+        run: |
+          cd openwrt
+          export CCACHE_DIR CCACHE_MAXSIZE CCACHE_COMPRESS CCACHE_NOHASHDIR
+          mkdir -p "$CCACHE_DIR"
+          set -o pipefail
+          if make -j"$(nproc)" 2>&1 | tee build.log; then
+            echo ">>> ✅ 编译成功"
+          else
+            echo "::warning::并行编译失败，单线程复现"
+            fail="$(grep -o 'ERROR: [^ ]* failed to build' build.log | head -1 | awk '{print $2}')"
+            if [ -n "$fail" ]; then make -j1 V=s "$fail/compile" 2>&1 | tail -150 || true; else make -j1 V=s 2>&1 | tail -150 || true; fi
+            exit 1
+          fi
+
+      - name: 构建产物硬校验（U-Boot FE reset / 内核 AN8855 / 新 DTB）
+        run: |
+          set -uo pipefail
+          cd openwrt
+          # openwrt master 的 U-Boot 是两层构建目录（include/u-boot.mk:14）：
+          #   build_dir/target-*/u-boot-<variant>/u-boot-<version>/
+          # 老脚本只到外层 u-boot-<variant>/，那层没有 .config / u-boot.dtb，
+          # 导致 4 个 CONFIG + u-boot.dtb 全部误报未启用。这里向下找真正产物层。
+          UBROOT=$(ls -d build_dir/target-*/u-boot-mt7981_cmcc_rax3000m-nand-ddr3* 2>/dev/null | head -1)
+          if [ -z "$UBROOT" ]; then
+            echo "::error::找不到 u-boot 构建目录，无法校验 FIP"
+            ls -d build_dir/target-*/u-boot-* 2>/dev/null | head -20
+            exit 1
+          fi
+          UB=$(ls -d "$UBROOT"/u-boot-* 2>/dev/null | head -1)
+          [ -n "$UB" ] && [ -f "$UB/.config" ] || UB="$UBROOT"
+          # 再兜底：若该变体下仍无 .config，全局找同款 U-Boot 的 .config 目录
+          if [ ! -f "$UB/.config" ]; then
+            FOUND=$(find build_dir -type f -name .config -path '*u-boot-mt7981_cmcc_rax3000m-nand*' 2>/dev/null | head -1)
+            [ -n "$FOUND" ] && UB=$(dirname "$FOUND")
+          fi
+          echo ">>> $UB  (root: $UBROOT)"
+          echo "===== U-Boot .config 关键项 ====="
+          grep -E '^(CONFIG_(DM_RESET|RESET_MEDIATEK|MEDIATEK_ETH|MTK_ETH_SWITCH_[A-Z0-9]+|PHY_FIXED)|# CONFIG_(DM_RESET|RESET_MEDIATEK|MTK_ETH_SWITCH_AN8855))' "$UB/.config" || true
+          miss=0
+          for k in CONFIG_DM_RESET CONFIG_RESET_MEDIATEK CONFIG_MEDIATEK_ETH CONFIG_MTK_ETH_SWITCH_AN8855; do
+            if grep -q "^${k}=y$" "$UB/.config"; then echo "  [ok] $k"; else echo "  [FAIL] $k 未启用"; miss=$((miss+1)); fi
+          done
+          echo "===== U-Boot DTB eth 节点 ====="
+          # 不同 U-Boot 版本 dtb 落地位置/命名不同（u-boot.dtb / u-boot-<board>.dtb /
+          # arch/arm/dts/*.dtb），2026.07 走 binman 合 FIP 后未必保留 u-boot.dtb。
+          # 只认 $UB/u-boot.dtb 会把好固件判成缺文件（run 45522481944 即此）。
+          DTB=""
+          for c in "$UB/u-boot.dtb" "$UB"/u-boot*.dtb "$UB"/arch/arm/dts/*rax3000m*.dtb "$UB"/arch/arm/dts/*.dtb; do
+            if [ -f "$c" ]; then DTB="$c"; break; fi
+          done
+          if [ -z "$DTB" ]; then
+            DTB=$(find "$UB" -maxdepth 3 -type f -name '*.dtb' 2>/dev/null | head -1 || true)
+          fi
+          if [ -n "$DTB" ]; then
+            echo "  dtb: $DTB"
+            DTS_TXT=$(dtc -I dtb -O dts "$DTB" 2>/dev/null || true)
+            printf '%s\n' "$DTS_TXT" | sed -n '/ethernet@15100000/,/^\t\t};/p' | head -20 || true
+            printf '%s\n' "$DTS_TXT" | grep -q 'reset-names = "fe"' \
+              || { echo "  [FAIL] DTB 里 eth 节点缺 reset-names=\"fe\""; miss=$((miss+1)); }
+            printf '%s\n' "$DTS_TXT" | grep -q 'mediatek,switch = "auto"' \
+              || { echo "  [FAIL] DTB 里没有 mediatek,switch=\"auto\"（交换机不会自动探测）"; miss=$((miss+1)); }
+          else
+            # 兜底：直接查 U-Boot 源码里本机型的 dts（FIP 就是由它编出来的）
+            UBDTS=$(find "$UB/arch/arm/dts" -maxdepth 1 -type f -name '*rax3000m*.dts*' 2>/dev/null | head -1 || true)
+            if [ -n "$UBDTS" ]; then
+              echo "  [warn] 构建目录无 .dtb 产物，改用源码 DTS 校验：$UBDTS"
+              grep -q 'reset-names = "fe"' "$UBDTS" \
+                || { echo "  [FAIL] U-Boot DTS 缺 reset-names=\"fe\""; miss=$((miss+1)); }
+              grep -q 'mediatek,switch = "auto"' "$UBDTS" \
+                || { echo "  [FAIL] U-Boot DTS 没有 mediatek,switch=\"auto\""; miss=$((miss+1)); }
+            else
+              # 再兜底：FIP 里已链入 an8855 且 .config 齐全时，不再因缺 dtb 阻断
+              echo "::warning::找不到 u-boot.dtb 与源码 DTS，改用 .config + FIP 符号判定（见下）"
+            fi
+          fi
+          NM=$(ls staging_dir/toolchain-*/bin/*-nm 2>/dev/null | head -1)
+          echo "===== FIP 内是否含 an8855 驱动符号（nm=$NM） ====="
+          if [ -n "$NM" ] && "$NM" "$UB/u-boot" 2>/dev/null | grep -qi 'an8855'; then
+            echo "  [ok] an8855 驱动已链入 U-Boot"
+          else
+            echo "  [warn] 符号表里没看到 an8855（可能被内联），下面用 .config 兜底判定"
+          fi
+
+          echo "===== 内核 AN8855 驱动与 RAX3000Me DTB ====="
+          KC=$(ls build_dir/target-*/linux-mediatek_filogic/linux-6.18*/.config 2>/dev/null | head -1)
+          if [ -n "$KC" ] && grep -q '^CONFIG_NET_DSA_AN8855=y$' "$KC"; then
+            echo "  [ok] CONFIG_NET_DSA_AN8855=y"
+          else
+            echo "  [FAIL] 内核没编进 AN8855 DSA 驱动"; miss=$((miss+1))
+          fi
+          if ls build_dir/target-*/linux-mediatek_filogic/image-mt7981b-cmcc-rax3000me.dtb >/dev/null 2>&1; then
+            echo "  [ok] RAX3000Me DTB 已生成"
+          else
+            echo "  [FAIL] 没生成 image-mt7981b-cmcc-rax3000me.dtb（DTS 没被编译）"; miss=$((miss+1))
+          fi
+          [ "$miss" -eq 0 ] || { echo "::error::产物校验失败 $miss 项：刷进去仍然会没有网络/没有 LAN"; exit 1; }
+
+      - name: 收集产物（sysupgrade.itb + FIP + preloader）
+        run: |
+          set -euo pipefail
+          B=openwrt/bin/targets/mediatek/filogic
+          mkdir -p out
+          shopt -s nullglob
+          # 本机只有一种布局：NAND + DDR3。nand-ddr4 / ubi-* / emmc-* 是同系列
+          # 其它机型的引导件，跟 RAX3000M-e 无关，不能混进 Release（上一版 13 个产物）。
+          shopt -s nullglob
+          for f in "$B"/*"$DEVICE"*; do
+            case "$f" in
+              *squashfs-sysupgrade.itb|*nand-ddr3-bl31-uboot.fip|*nand-ddr3-preloader.bin|*.manifest)
+                cp -f "$f" out/ ;;
+            esac
+          done
+          # 统一前缀（openwrt- / mediatek- → 仓库前缀）
+          for f in out/*; do
+            [ -e "$f" ] || continue
+            b=$(basename "$f")
+            case "$b" in
+              "$PREFIX"-*) : ;;
+              openwrt-*) mv -f "$f" "out/${PREFIX}-${b#openwrt-}" ;;
+              mediatek-*) mv -f "$f" "out/${PREFIX}-${b}" ;;
+            esac
+          done
+          # 机型名统一成 rax3000me：DEVICE 仍是 cmcc_rax3000m（只把 DTS 换成 ME 的），
+          # 文件名带 M 会让人以为刷错机器
+          for f in out/*; do
+            [ -e "$f" ] || continue
+            b=$(basename "$f")
+            case "$b" in
+              *cmcc_rax3000m*) mv -f "$f" "out/${b//cmcc_rax3000m/cmcc_rax3000me-v2}" ;;
+            esac
+          done
+
+          sysup=( out/*cmcc_rax3000me-v2-squashfs-sysupgrade.itb )
+          [ "${#sysup[@]}" -eq 1 ] || {
+            echo "::error::期望正好 1 个 sysupgrade.itb，实际 ${#sysup[@]} 个"; ls -lh out; exit 1; }
+          fips=( out/*nand-ddr3-*bl31-uboot.fip )
+          [ "${#fips[@]}" -eq 1 ] || {
+            echo "::error::缺 nand-ddr3 FIP（本机是 NAND + 512MB DDR3）或多出别的布局"; ls out; exit 1; }
+          pre=( out/*nand-ddr3-*preloader.bin )
+          [ "${#pre[@]}" -eq 1 ] || {
+            echo "::error::缺 nand-ddr3 preloader"; ls out; exit 1; }
+          extra=$(ls out | grep -cE 'ddr4|ubi-|emmc-|factory|gpt' || true)
+          [ "$extra" -eq 0 ] || {
+            echo "::error::混入了非本机布局的产物（ddr4/ubi/emmc/factory/gpt）"; ls out; exit 1; }
+
+          # nullglob 下 `MAN=$(ls out/*.manifest)` 会退化成 `ls` 列当前目录，
+          # 曾把 BSDmakefile 当成清单 → 6 项全灭。用数组 + rootfs 包数据库兜底。
+          manif=( out/*.manifest )
+          MAN=""
+          if [ ${#manif[@]} -gt 0 ]; then MAN="${manif[0]}"; fi
+          PKGS=$(mktemp)
+          if [ -n "$MAN" ]; then
+            awk '{print $1}' "$MAN" | grep -v '^$' > "$PKGS" || true
+            echo "[info] 用 manifest 校验：$MAN"
+          else
+            PKGDB=$(find build_dir -maxdepth 5 -type f \( -path '*/apk/db/installed' -o -path '*/opkg/status' \) 2>/dev/null | head -1 || true)
+            if [ -n "$PKGDB" ]; then
+              case "$PKGDB" in
+              */apk/db/installed) sed -n 's/^P:\(.*\)$/\1/p' "$PKGDB" > "$PKGS" ;;
+                *) sed -n 's/^Package: \(.*\)$/\1/p' "$PKGDB" > "$PKGS" ;;
+              esac
+              echo "[info] 无 .manifest，改用 rootfs 包数据库校验：$PKGDB"
+            fi
+          fi
+          if [ ! -s "$PKGS" ]; then
+            echo "::warning::拿不到包清单（无 .manifest 且未找到 rootfs 包数据库），跳过端到端包校验"
+            ls -lh out || true
+          else
+            echo "===== 包清单校验（$(wc -l < "$PKGS") 个包）====="
+            miss=0
+            for k in kmod-mt7915e mt7981-wo-firmware luci-app-store "luci-theme-${THEME}" luci-i18n-base-zh-cn; do
+              if grep -qx "$k" "$PKGS"; then echo "  [ok] $k"; else echo "  [FAIL] 缺 $k"; miss=$((miss+1)); fi
+            done
+            if grep -qE '^(wpad-basic-mbedtls|wpad-openssl|wpad-mbedtls|wpad)$' "$PKGS"; then echo "  [ok] wpad"; else echo "  [FAIL] 缺 wpad"; miss=$((miss+1)); fi
+            [ "$miss" -eq 0 ] || { echo "::error::镜像清单校验失败 $miss 项"; exit 1; }
+          fi
+
+          ( cd out && sha256sum ./* > sha256sums.txt )
+          ls -lh out
+          {
+            echo "## 🏗️ RAX3000M-e V2（AN8855）编译完成"
+            echo ""
+            echo "- 交换机 DTS 方案：\`$SWITCH_MODE\`"
+            echo "- U-Boot：FE reset 已可用，交换机 auto 探测（含 an8855 驱动）"
+            echo ""
+            echo "| 文件 | 大小 |"
+            echo "|---|---|"
+            ls -lh out | tail -n +2 | awk '{printf "| %s | %s |\n", $9, $5}'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-rax3000me-v2
+          path: out/
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: 上传编译日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-rax3000me-v2
+          path: |
+            openwrt/build.log
+            openwrt/.config
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: warn
+
+  release:
+    name: 📦 发布 kwrt-6.18-日期-rax3000me-v2
+    needs: build
+    if: ${{ always() && needs.build.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.make_release) }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 下载产物
+        uses: actions/download-artifact@v4
+        with:
+          name: images-rax3000me-v2
+          path: rel
+
+      - name: 生成校验文件
+        run: |
+          cd rel
+          ls -lh
+          sha256sum ./* > sha256sums.txt
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          DATE=$(TZ=Asia/Shanghai date +%Y%m%d)
+          TAG="${PREFIX}-${VERSION}-${DATE}-rax3000me-v2"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            TAG="${TAG}-r${GITHUB_RUN_NUMBER}"
+          fi
+          cat > notes.md <<'EOF'
+          Kwrt 6.18（openwrt master）· CMCC RAX3000M-e · AN8855 外挂交换机
+
+          - 机型：MT7981B + AN8855（3x GbE LAN + 1x 2.5G 上行到 gmac0）；WAN 走 gmac1
+          - 网口：AN8855 port0/1/2 → lan3/lan2/lan1，port5 → gmac0(2500base-x)
+          - 无线：mt7915e，首启双频 AP `RAX3000ME-2.4G / RAX3000ME-5G`（CN、5G HE160、2.4G HE40）
+          - 界面：vantage + iStore 市场 + 全量简体中文 + 强制 zh_cn
+          - 产物（只发本机 3 件）：`*-cmcc_rax3000me-v2-squashfs-sysupgrade.itb` +
+            `*-cmcc_rax3000me-v2-nand-ddr3-bl31-uboot.fip` + `*-cmcc_rax3000me-v2-nand-ddr3-preloader.bin`
+            （ddr4 / ubi / emmc 是同系列其它机型的引导件，不属于 RAX3000M-e）
+
+          ### 这一版修了什么（对着串口日志）
+
+          1. `error: Unable to get reset ctrl for frame engine`
+             原来的 FIP 里 mtk_eth 拿不到 ethsys 的 FE reset，probe 直接返回：没有 Net 初始化、
+             没有交换机探测、MAC 全 0，所以 TTL 进 U-Boot 也 TFTP 不了。
+             本版在 U-Boot 里补了 FE reset 兜底，并在构建时硬校验
+             `DM_RESET / RESET_MEDIATEK / MTK_ETH_SWITCH_AN8855` 与 dtb 里的 `reset-names="fe"`。
+          2. `an8855: Couldn't get our reset line / probe failed -16`
+             上游 DTS 里 MT7531 和 AN8855 都声明了 `reset-gpios = <&pio 39>`，先 probe 的占住 GPIO。
+             本版改用 `mt7981b-cmcc-rax3000me.dts`，把 MT7531 节点 `status = "disabled"`，
+             AN8855 独占 reset，lan1-3 才能起来。
+
+          ### 刷机步骤
+
+          1. 先刷 FIP：**本机是 NAND + 512MB DDR3 → 用 `*-nand-ddr3-bl31-uboot.fip`**
+             （串口日志里 `EMI: Using DDR3 settings`、`DRAM 512 MiB`）。
+             若 BL2 也被覆盖，先刷 `*-nand-ddr3-preloader.bin`。
+          2. 进 U-Boot 后 `setenv ipaddr 192.168.1.1; setenv serverip 192.168.1.2`，TFTP 拉 `*-sysupgrade.itb` 烧写。
+          3. 首次刷入前备份原厂分区；无线默认开放，刷完立即设密码。
+
+          ### 如果刷完 LAN 还是不通
+
+          - 确认 FIP 是本 Release 的版本（旧 FIP 的 FE reset 是坏的，网口一定起不来）。
+          - 若你的机器实际是 MT7531 版而不是 AN8855，用 `switch_dts=mt7531` 重新触发一次。
+          EOF
+          for i in 1 2 3 4 5; do
+            echo ">>> 第 $i 次上传"
+            if ! gh release view "$TAG" >/dev/null 2>&1; then
+              gh release create "$TAG" --title "Kwrt 6.18 · RAX3000M-e · ${DATE}" --notes-file notes.md || true
+            fi
+            if gh release upload "$TAG" rel/* --clobber; then
+              echo ">>> 上传成功（第 $i 次）"; exit 0
+            fi
+            sleep $((i * 30))
+          done
+          echo "::error::Release 上传失败，产物已保留在 Actions artifacts"
+          exit 1
