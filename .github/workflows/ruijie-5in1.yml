@@ -805,10 +805,10 @@ jobs:
               if [ -n "$ROOTFS" ]; then
                 unsquashfs -no-progress -f -d "$TMPD/sq" "$ROOTFS" >/dev/null 2>&1 || true
                 if [ -f "$TMPD/sq/lib/apk/db/installed" ]; then
-                  sed -n 's/^P://(.*//)$///1/p' "$TMPD/sq/lib/apk/db/installed" > "$PKGS"
+          sed -n 's/^P:\(.*\)$/\1/p' "$TMPD/sq/lib/apk/db/installed" > "$PKGS"
                   echo "[info] 无 .manifest，改用镜像 apk 数据库校验（$(wc -l < "$PKGS") 个包）"
                 elif [ -f "$TMPD/sq/usr/lib/opkg/status" ]; then
-                  sed -n 's/^Package: \(.*\)$/\1/p' "$TMPD/sq/usr/lib/opkg/status" > "$PKGS"
+          sed -n 's/^Package: \(.*\)$/\1/p' "$TMPD/sq/usr/lib/opkg/status" > "$PKGS"
                   echo "[info] 无 .manifest，改用镜像 opkg 数据库校验（$(wc -l < "$PKGS") 个包）"
                 fi
               fi
