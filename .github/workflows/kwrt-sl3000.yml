@@ -810,7 +810,7 @@ jobs:
           else
             echo "  [FAIL] 没生成 sl-3000-emmc 的 dtb"; miss=$((miss+1));
           fi
-          KC=$(ls openwrt/build_dir/target-*/linux-*/.config 2>/dev/null | head -1)
+          KC=$(ls openwrt/build_dir/target-*/linux-*/.config 2>/dev/null | head -1 || true)
           if [ -n "$KC" ]; then
             for k in CONFIG_MTK_ETH CONFIG_NET_DEVICES CONFIG_MT7915E; do
               grep -q "^${k}=y$" "$KC" && echo "  [ok] $k" || { echo "  [FAIL] $k 未启用"; miss=$((miss+1)); }
