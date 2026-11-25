@@ -478,13 +478,18 @@ jobs:
           ls "$B"/*cmcc_rax3000me-nand-ddr3-preloader.bin >/dev/null 2>&1 \
             || { echo "  [FAIL] 缺 nand-ddr3 preloader"; miss=$((miss+1)); }
 
-          dts=target/linux/mediatek/dts/mt7981b-cmcc-rax3000me.dts
+          # 此步骤在仓库根目录执行，DTS 在 openwrt/ 下；用 find 兜底不同小版本文件名
+          dts=$(find openwrt/target/linux/mediatek/dts -maxdepth 1 -type f -name '*rax3000me*.dts' 2>/dev/null | head -1 || true)
+          [ -n "$dts" ] || dts=openwrt/target/linux/mediatek/dts/mt7981b-cmcc-rax3000me.dts
           echo "===== DTS 交换机节点 ====="
-          grep -nE 'an8855-switch|reset-gpios = <&pio 39|^&switch|status = "disabled"' "$dts" | head -10
-          grep -q 'status = "disabled"' "$dts" \
-            || { echo "  [FAIL] MT7531 节点没被禁用（AN8855 会 -EBUSY）"; miss=$((miss+1)); }
+          grep -nE 'an8855-switch|reset-gpios = <&pio 39|^&switch|status = "disabled"' "$dts" | head -10 || true
+          if [ -f "$dts" ] && grep -q 'status = "disabled"' "$dts"; then
+            echo "  [ok] MT7531 节点已禁用"
+          else
+            echo "  [FAIL] MT7531 节点没被禁用（AN8855 会 -EBUSY）"; miss=$((miss+1))
+          fi
 
-          KC=$(ls build_dir/target-*/linux-mediatek_filogic/linux-*/.config 2>/dev/null | head -1)
+          KC=$(ls openwrt/build_dir/target-*/linux-mediatek_filogic/linux-*/.config 2>/dev/null | head -1 || true)
           if [ -n "$KC" ]; then
             if grep -q '^CONFIG_NET_DSA_AN8855=y$' "$KC"; then
               echo "  [ok] CONFIG_NET_DSA_AN8855=y"
