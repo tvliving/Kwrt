@@ -57,7 +57,7 @@ EOF
 
 echo "== 5.5/7 追加机型附加包（packages.txt 单点维护） =="
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PKGLIST="$HERE/devices-pack/ew6000gx/packages.txt"
+PKGLIST="$HERE/devices-pack/ew6000gxpro/packages.txt"
 if [ -f "$PKGLIST" ]; then
   n=0
   while IFS= read -r pkg || [ -n "$pkg" ]; do

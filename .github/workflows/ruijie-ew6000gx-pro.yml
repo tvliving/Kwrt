@@ -8,7 +8,7 @@
 #   无线    ：首启 97-ruijie-wifi 按 band 生成双频 AP，随后 99-wifi-boost 做增强
 #   界面    ：vantage 主题 + iStore 市场 + 强制简体中文 + 标准 LuCI 首页（状态-概览）
 #
-# 发布：tag = kwrt-25.12-<北京日期>-ew6000gx（与 4 合一隔离）（例 kwrt-25.12-20261124），
+# 发布：tag = kwrt-25.12-<北京日期>-ew6000gxpro-pro（与 4 合一隔离）（例 kwrt-25.12-20261124），
 #      一次构建只发一个 Release，不再出现 openwrt-* 与 kwrt-* 两份。
 name: Kwrt EW-6000GX PRO · 单独构建
 
@@ -26,11 +26,11 @@ on:
         description: '只构建某个机型（all = 全部）'
         type: choice
         default: 'all'
-        options: ['all', 'ew6000gx']
+        options: ['all', 'ew6000gxpro']
   push:
     branches: [25.12]
     paths:
-      - '.github/workflows/ruijie-ew6000gx.yml'
+      - '.github/workflows/ruijie-ew6000gxpro-pro-pro.yml'
       - '.github/scripts/ruijie-5in1-inject.sh'
       - 'scripts/apply-pack.py'
       - 'scripts/customize.sh'
@@ -40,7 +40,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: ruijie-ew6000gx-${{ github.ref }}
+  group: ruijie-ew6000gxpro-pro-pro-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -67,7 +67,7 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - slug: ew6000gx
+          - slug: ew6000gxpro
             title: EW-6000GX PRO (MT7986A)
     steps:
       - name: 是否跳过（手动指定其它机型时）
@@ -269,7 +269,7 @@ jobs:
           cat > /tmp/ruijie-inject.sh <<'RUIJIE_INJECT_EOF'
           set -euo pipefail
           
-          SLUG="${SLUG:?SLUG 未设置（ew6000gx）}"
+          SLUG="${SLUG:?SLUG 未设置（ew6000gxpro）}"
           SRC="${SOURCE_ROOT:-${1:-openwrt}}"
           [ -d "$SRC" ] || { echo "::error::源码树不存在: $SRC"; exit 1; }
           SRC="$(cd "$SRC" && pwd)"
@@ -280,7 +280,7 @@ jobs:
           
           # 机型元数据：网口期望 + SSID 前缀（唯一来源）
           case "$SLUG" in
-            ew6000gx) LAN_EXPECT='lan1 lan2 lan3 lan4';             WAN_EXPECT='eth1';   SSID_BASE='EW6000GX' ;;
+            ew6000gxpro) LAN_EXPECT='lan1 lan2 lan3 lan4';             WAN_EXPECT='eth1';   SSID_BASE='EW6000GXPRO' ;;
             x60new)   LAN_EXPECT='lan1 lan2 lan3';                  WAN_EXPECT='eth1';   SSID_BASE='X60NEW' ;;
             x30epro)  LAN_EXPECT='lan1 lan2 lan3';                  WAN_EXPECT='wan';    SSID_BASE='X30EPRO' ;;
             rgx30e)   LAN_EXPECT='lan1 lan2 lan3';                  WAN_EXPECT='wan';    SSID_BASE='X30E' ;;
@@ -837,7 +837,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: 📦 发布 kwrt-25.12-日期-ew6000gx
+    name: 📦 发布 kwrt-25.12-日期-ew6000gxpro-pro
     needs: build
     if: ${{ always() && needs.build.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.make_release) }}
     runs-on: ubuntu-24.04
@@ -867,7 +867,7 @@ jobs:
           ls -lh
           sha256sum ./* > sha256sums.txt
 
-      - name: 创建 Release（kwrt-<大版本>-<北京日期>-ew6000gx）
+      - name: 创建 Release（kwrt-<大版本>-<北京日期>-ew6000gxpro-pro）
         if: steps.check.outputs.empty != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -875,7 +875,7 @@ jobs:
         run: |
           set -uo pipefail
           DATE=$(TZ=Asia/Shanghai date +%Y%m%d)
-          TAG="${PREFIX}-${VERSION}-${DATE}-ew6000gx"
+          TAG="${PREFIX}-${VERSION}-${DATE}-ew6000gxpro-pro"
           if gh release view "$TAG" >/dev/null 2>&1; then
             TAG="${TAG}-r${GITHUB_RUN_NUMBER}"
           fi

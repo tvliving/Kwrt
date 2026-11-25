@@ -8,15 +8,10 @@
 #     的 DEVICE_PACKAGES 没有 Wi-Fi 驱动（只有 ubootmod 那份带）。
 #
 # ---- Wi-Fi 驱动（MT7986 = mt7915e + mt7986 固件 + WO 固件）----
-kmod-mt76-core
 kmod-mt7915e
 kmod-mt7986-firmware
 mt7986-wo-firmware
 kmod-phy-airoha-en8811h
-# 无线页面依赖：iwinfo 提供 /sbin/iwinfo，regdb 提供管制域，wpad 是 hostapd 套件
-wpad-basic-mbedtls
-wireless-regdb
-iwinfo
 
 # ---- LuCI 基础 ----
 luci
@@ -25,8 +20,6 @@ luci-mod-admin-full
 luci-mod-status
 luci-mod-system
 luci-mod-network
-luci-compat
-luci-lua-runtime
 uhttpd
 uhttpd-mod-ubus
 luci-proto-ppp

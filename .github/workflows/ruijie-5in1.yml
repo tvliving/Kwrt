@@ -286,7 +286,7 @@ jobs:
           
           # 机型元数据：网口期望 + SSID 前缀（唯一来源）
           case "$SLUG" in
-            ew6000gx) LAN_EXPECT='lan1 lan2 lan3 lan4';             WAN_EXPECT='eth1';   SSID_BASE='EW6000GX' ;;
+            ew6000gxpro) LAN_EXPECT='lan1 lan2 lan3 lan4';             WAN_EXPECT='eth1';   SSID_BASE='EW6000GXPRO' ;;
             x60new)   LAN_EXPECT='lan1 lan2 lan3';                  WAN_EXPECT='eth1';   SSID_BASE='X60NEW' ;;
             x30epro)  LAN_EXPECT='lan1 lan2 lan3';                  WAN_EXPECT='wan';    SSID_BASE='X30EPRO' ;;
             rgx30e)   LAN_EXPECT='lan1 lan2 lan3';                  WAN_EXPECT='wan';    SSID_BASE='X30E' ;;
