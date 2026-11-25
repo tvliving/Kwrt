@@ -175,6 +175,7 @@ jobs:
           python3 - <<'PY'
           import io
           import os
+          import re
 
           # 上游 25.12 的 libsepol / libselinux 都是 3.9，InstallDev 统一从
           # $(PKG_INSTALL_DIR)/usr/include/* 与 usr/lib/pkgconfig/<name>.pc 取文件。
@@ -208,25 +209,30 @@ jobs:
               return n
 
           a = fix('package/libs/libsepol/Makefile', 'libsepol', 'include/sepol')
-          # libbpf 1.6.2：增量/缓存场景下 ipkg-install 里可能只有 libbpf.a，
-          # 而 Package/libbpf/install 硬拷 libbpf.so.* 会直接失败
-          # （action 仓库 6000GX 构建即栽在 cp cannot stat libbpf.so.*）。
-          # 强制 install 之前先重建 all（含 SHARED_LIBS），保证 .so 一定存在。
+          # libbpf 1.6.2：Build/Install 必须定义在 include package.mk **之后**，
+          # 否则会被 package.mk 的 `Build/Install=$(if $(PKG_INSTALL),$(call Build/Install/Default,))`
+          # 无条件覆盖（上一版插在前面，等于没改，仍然 cp cannot stat libbpf.so.*）。
+          # 同时 Package/install 对 .so 位置做兜底（usr/lib、usr/lib64、构建目录）。
           p = 'package/libs/libbpf/Makefile'
           if os.path.exists(p):
               s = io.open(p, encoding='utf-8').read()
-              if 'define Build/Install\n' not in s:
-                  s = s.replace(
-                      'MAKE_PATH = src\n',
-                      'MAKE_PATH = src\n\n'
-                      'define Build/Install\n'
-                      '\t+$(MAKE) $(PKG_JOBS) -C $(PKG_BUILD_DIR)/$(MAKE_PATH) $(TARGET_CONFIGURE_OPTS) $(MAKE_FLAGS) all\n'
-                      '\t+$(MAKE) $(PKG_JOBS) -C $(PKG_BUILD_DIR)/$(MAKE_PATH) $(TARGET_CONFIGURE_OPTS) $(MAKE_FLAGS) DESTDIR=$(PKG_INSTALL_DIR) install\n'
-                      'endef\n', 1)
-                  io.open(p, 'w', encoding='utf-8').write(s)
-                  print('>>> libbpf: Build/Install 强制 all + install（保证 .so 产出）')
-              else:
-                  print('>>> libbpf: Build/Install 已存在，跳过')
+              block = ('define Build/Install\n'
+                       '\t+$(MAKE) $(PKG_JOBS) -C $(PKG_BUILD_DIR)/$(MAKE_PATH) $(MAKE_FLAGS) all\n'
+                       '\t+$(MAKE) $(PKG_JOBS) -C $(PKG_BUILD_DIR)/$(MAKE_PATH) $(MAKE_FLAGS) DESTDIR="$(PKG_INSTALL_DIR)" install\n'
+                       'endef\n')
+              anchor = 'include $(INCLUDE_DIR)/nls.mk\n'
+              if anchor in s:
+                  # 先清掉可能存在的旧定义（上一版插在 MAKE_PATH 之后，会被覆盖）
+                  s = re.sub(r'define Build/Install\n(?:\t.*\n)+endef\n', '', s, count=1)
+                  s = s.replace(anchor, anchor + '\n' + block, 1)
+              old_inst = '\t$(CP) $(PKG_INSTALL_DIR)/usr/lib/libbpf.so.* $(1)/usr/lib/'
+              new_inst = ('\t$(CP) $(PKG_INSTALL_DIR)/usr/lib/libbpf.so* $(1)/usr/lib/ 2>/dev/null \\\n'
+                          '\t\t|| $(CP) $(PKG_INSTALL_DIR)/usr/lib64/libbpf.so* $(1)/usr/lib/ 2>/dev/null \\\n'
+                          '\t\t|| $(CP) $(PKG_BUILD_DIR)/$(MAKE_PATH)/libbpf.so* $(1)/usr/lib/')
+              if old_inst in s:
+                  s = s.replace(old_inst, new_inst, 1)
+              io.open(p, 'w', encoding='utf-8').write(s)
+              print('>>> libbpf: Build/Install 放到 package.mk 之后 + install 位置兜底')
           b = fix('package/libs/libselinux/Makefile', 'libselinux', 'include/selinux')
           # libselinux 3.9 的 utils/Makefile 用 `-lsepol` 链接 sefcontext_compile，
           # 但 OpenWrt 25.12 的 TARGET_LDFLAGS 不含 -L$(STAGING_DIR)/usr/lib，
