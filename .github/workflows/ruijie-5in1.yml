@@ -1,4 +1,4 @@
-# Kwrt 锐捷 5 机型定时构建（EW-6000GX PRO / RG-X60 New / RG-X30E Pro / RG-X30E / RG-BE72 Pro）
+# Kwrt 锐捷 4 机型定时构建（RG-X60 New / RG-X30E Pro / RG-X30E / RG-BE72 Pro）
 #
 # 本文件在 tvliving/lede、tvliving/Kwrt、tvliving/immortalwrt-mt798x-action、
 # s9xxx/immortalwrt-mt798x-6.6 四仓库保持同一套逻辑，只有主题/首页/发行名不同：
@@ -10,7 +10,7 @@
 #
 # 发布：tag = kwrt-25.12-<北京日期>（例 kwrt-25.12-20261124），
 #      一次构建只发一个 Release，不再出现 openwrt-* 与 kwrt-* 两份。
-name: Kwrt 锐捷 5 机型 · 定时构建
+name: Kwrt 锐捷 4 机型 · 定时构建
 
 on:
   schedule:
@@ -26,7 +26,7 @@ on:
         description: '只构建某个机型（all = 全部）'
         type: choice
         default: 'all'
-        options: ['all', 'ew6000gx', 'x60new', 'x30epro', 'rgx30e', 'be72pro']
+        options: ['all', 'x60new', 'x30epro', 'rgx30e', 'be72pro']
   push:
     branches: [25.12]
     paths:
@@ -67,8 +67,6 @@ jobs:
       max-parallel: 5
       matrix:
         include:
-          - slug: ew6000gx
-            title: EW-6000GX PRO (MT7986A)
           - slug: x60new
             title: RG-X60 New (MT7986A)
           - slug: x30epro
@@ -277,7 +275,7 @@ jobs:
           cat > /tmp/ruijie-inject.sh <<'RUIJIE_INJECT_EOF'
           set -euo pipefail
           
-          SLUG="${SLUG:?SLUG 未设置（ew6000gx|x60new|x30epro|rgx30e|be72pro）}"
+          SLUG="${SLUG:?SLUG 未设置（x60new|x30epro|rgx30e|be72pro）}"
           SRC="${SOURCE_ROOT:-${1:-openwrt}}"
           [ -d "$SRC" ] || { echo "::error::源码树不存在: $SRC"; exit 1; }
           SRC="$(cd "$SRC" && pwd)"
@@ -322,7 +320,7 @@ jobs:
             echo ">>> 已注入交换芯片驱动: $(ls "$PACK/packages" | tr '\n' ' ')"
           fi
           
-          # 2.5) 去掉 factory 产物：这 5 台都是多分区 U-Boot
+          # 2.5) 去掉 factory 产物：这 4 台都是多分区 U-Boot
           python3 - "$SRC" "$DEV" <<'PY'
           import io
           import re
@@ -770,7 +768,7 @@ jobs:
 
           sysup=( out/*"$DEV"*sysupgrade* )
           [ "${#sysup[@]}" -ge 1 ] || { echo "::error::$DEV 缺 sysupgrade 产物"; ls -lh "$B" out || true; exit 1; }
-          # 这 5 台都是多分区 U-Boot，只发 sysupgrade，出现 factory 一律失败
+          # 这 4 台都是多分区 U-Boot，只发 sysupgrade，出现 factory 一律失败
           if ls out | grep -qi factory; then
             echo "::error::多分区 U-Boot 机型不应有 factory 产物"; ls out; exit 1
           fi
@@ -781,7 +779,7 @@ jobs:
 
           # 用镜像 manifest 做端到端校验：无线驱动、主题、iStore、中文必须在最终 rootfs 里
           # 注意：本步骤启用了 nullglob + set -u，必须用数组判断；否则 ls 在无匹配时会列出
-          # 当前目录，把 openwrt/LICENSE 当成 manifest（正是 11-24 全 5 机型失败的原因）。
+          # 当前目录，把 openwrt/LICENSE 当成 manifest（正是 11-24 全机型失败的原因）。
           manif=( out/*"$DEV"*.manifest )
           MAN=""
           if [ ${#manif[@]} -gt 0 ]; then MAN="${manif[0]}"; fi
@@ -875,11 +873,10 @@ jobs:
             TAG="${TAG}-r${GITHUB_RUN_NUMBER}"
           fi
           cat > notes.md <<'EOF'
-          Kwrt 25.12 · 锐捷 5 机型自动编译（tvliving/Kwrt）
+          Kwrt 25.12 · 锐捷 4 机型自动编译（tvliving/Kwrt）
 
           | 机型 | 平台 | 网口 |
           |---|---|---|
-          | EW-6000GX PRO | MT7986A | lan1-4 + eth1（2.5G Airoha EN8811H）作 WAN |
           | RG-X60 New | MT7986A | lan1-3 + eth1 作 WAN |
           | RG-X30E Pro | MT7981B | wan + lan1-3 |
           | RG-X30E | MT7981B | wan + lan1-3 |
@@ -897,15 +894,15 @@ jobs:
 
           ### 注意
 
-          1. 5 台都是多分区 U-Boot，只提供 sysupgrade 包；首次刷入前请备份原厂分区，
+          1. 4 台都是多分区 U-Boot，只提供 sysupgrade 包；首次刷入前请备份原厂分区，
              BE72 Pro 需先刷对应 U-Boot mod 布局。
-          2. EW-6000GX PRO / X60 New 的 2.5G WAN 走 gmac1(eth1)，LAN 走 MT7531。
+          2. X60 New 的 2.5G WAN 走 gmac1(eth1)，LAN 走 MT7531。
           3. 无线默认开放，刷入后请立即设置密码。
           EOF
           for i in 1 2 3 4 5; do
             echo ">>> 第 $i 次上传"
             if ! gh release view "$TAG" >/dev/null 2>&1; then
-              gh release create "$TAG" --title "Kwrt 25.12 · 锐捷 5 机型 · ${DATE}" --notes-file notes.md || true
+              gh release create "$TAG" --title "Kwrt 25.12 · 锐捷 4 机型 · ${DATE}" --notes-file notes.md || true
             fi
             if gh release upload "$TAG" rel/* --clobber; then
               echo ">>> 上传成功（第 $i 次）"
