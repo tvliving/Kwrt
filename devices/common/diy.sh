@@ -19,6 +19,16 @@ sed -i "s?git.openwrt.org/\(project\|feed\)?github.com/openwrt?g" feeds.conf.def
 # 该包未被任何机型选用，直接剔除以消除随机构建失败
 rm -rf feeds/kiddin9/dufs
 
+# kiddin9 feed 的 fullconenat 在 25.12 下解析不出 PKG_SOURCE，
+# make 直接报 `Makefile:69: *** ERROR: Unknown pack format for file .../tmp/dl/.`，
+# 并行与单线程重跑都必失败，导致整轮 world 编译中断（Kwrt run 45556909662）。
+# 处理同 dufs：连 feeds 源目录与 install 出来的软链一起删，
+# 之后 defconfig 会自动丢弃 kmod-fullconenat / luci-app-fullconenat 等符号。
+for bad in fullconenat; do
+	rm -rf "feeds/kiddin9/$bad" "package/feeds/kiddin9/$bad"
+	echo ">>> 已剔除 kiddin9/$bad（下载配方损坏，Unknown pack format）"
+done
+
 sed --follow-symlinks -i "s#%C\"#%C by Kiddin'\"#" package/base-files/files/etc/os-release
 sed -i -e '$a /etc/bench.log' \
         -e '/\/etc\/profile/d' \
