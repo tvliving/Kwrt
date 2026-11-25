@@ -348,7 +348,7 @@ jobs:
           grep -q '^CONFIG_LUCI_LANG_zh_Hans=y$' .config || { echo "::error::中文开关未开启"; exit 1; }
           if ! grep -q '^CONFIG_PACKAGE_uhttpd=y$' .config; then
             echo "::warning::uhttpd 未选中，补写 luci/uhttpd 后重建配置"
-            grep -nE '^#? ?CONFIG_PACKAGE_(luci|luci-light|uhttpd)=' .config | head -10 || true
+            grep -nE '^#? ?CONFIG_PACKAGE_(luci|luci-light|uhttpd)=' .config | head -10 || true || true
             printf 'CONFIG_PACKAGE_luci=y\nCONFIG_PACKAGE_uhttpd=y\n' >> .config
             make defconfig
           fi
@@ -445,7 +445,8 @@ jobs:
           [ "$miss" -eq 0 ] || { echo "::error::产物校验失败 $miss 项"; exit 1; }
           echo "✔ 官方产物齐全（sysupgrade + nand-ddr3 FIP + preloader）"
 
-          KC=$(ls build_dir/target-*/linux-mediatek_filogic/linux-*/.config 2>/dev/null | head -1)
+          KC=""
+          for _c in build_dir/target-*/linux-mediatek_filogic/linux-*/.config; do [ -f "$_c" ] && { KC="$_c"; break; }; done
           if [ -n "$KC" ]; then
             echo "===== 内核关键项 ====="
             grep -E '^(CONFIG_NET_DSA_AN8855|CONFIG_NET_DSA_MT7530)=' "$KC" || true

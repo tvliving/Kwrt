@@ -384,7 +384,7 @@ jobs:
           grep -q '^CONFIG_LUCI_LANG_zh_Hans=y$' .config || { echo "::error::中文开关未开启"; exit 1; }
           if ! grep -q '^CONFIG_PACKAGE_uhttpd=y$' .config; then
             echo "::warning::uhttpd 未选中，补写 luci/uhttpd 后重建配置"
-            grep -nE '^#? ?CONFIG_PACKAGE_(luci|luci-light|uhttpd)=' .config | head -10 || true
+            grep -nE '^#? ?CONFIG_PACKAGE_(luci|luci-light|uhttpd)=' .config | head -10 || true || true
             printf 'CONFIG_PACKAGE_luci=y\nCONFIG_PACKAGE_uhttpd=y\n' >> .config
             make defconfig
           fi
@@ -478,18 +478,14 @@ jobs:
           ls "$B"/*cmcc_rax3000me-nand-ddr3-preloader.bin >/dev/null 2>&1 \
             || { echo "  [FAIL] 缺 nand-ddr3 preloader"; miss=$((miss+1)); }
 
-          # 此步骤在仓库根目录执行，DTS 在 openwrt/ 下；用 find 兜底不同小版本文件名
-          dts=$(find openwrt/target/linux/mediatek/dts -maxdepth 1 -type f -name '*rax3000me*.dts' 2>/dev/null | head -1 || true)
-          [ -n "$dts" ] || dts=openwrt/target/linux/mediatek/dts/mt7981b-cmcc-rax3000me.dts
+          dts=target/linux/mediatek/dts/mt7981b-cmcc-rax3000me.dts
           echo "===== DTS 交换机节点 ====="
           grep -nE 'an8855-switch|reset-gpios = <&pio 39|^&switch|status = "disabled"' "$dts" | head -10 || true
-          if [ -f "$dts" ] && grep -q 'status = "disabled"' "$dts"; then
-            echo "  [ok] MT7531 节点已禁用"
-          else
-            echo "  [FAIL] MT7531 节点没被禁用（AN8855 会 -EBUSY）"; miss=$((miss+1))
-          fi
+          grep -q 'status = "disabled"' "$dts" \
+            || { echo "  [FAIL] MT7531 节点没被禁用（AN8855 会 -EBUSY）"; miss=$((miss+1)); }
 
-          KC=$(ls openwrt/build_dir/target-*/linux-mediatek_filogic/linux-*/.config 2>/dev/null | head -1 || true)
+          KC=""
+          for _c in build_dir/target-*/linux-mediatek_filogic/linux-*/.config; do [ -f "$_c" ] && { KC="$_c"; break; }; done
           if [ -n "$KC" ]; then
             if grep -q '^CONFIG_NET_DSA_AN8855=y$' "$KC"; then
               echo "  [ok] CONFIG_NET_DSA_AN8855=y"
