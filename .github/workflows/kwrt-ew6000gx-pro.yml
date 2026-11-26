@@ -26,6 +26,8 @@ concurrency:
 env:
   TZ: Asia/Shanghai
   SLUG: ew6000gx
+  # 设备包实际目录名是 ew6000gxpro；SLUG 保持 ew6000gx 以维持既有 artifact/Release 命名
+  PACK_SLUG: ew6000gxpro
 
 jobs:
   build:
@@ -66,7 +68,7 @@ jobs:
 
       - name: 注入设备包
         run: |
-          python3 scripts/apply-pack.py openwrt "$SLUG"
+          python3 scripts/apply-pack.py openwrt "$PACK_SLUG"
           grep -n "ew-6000gx" openwrt/target/linux/mediatek/image/filogic.mk | tail -6
           ls openwrt/target/linux/mediatek/dts/ | grep -i 6000gx
           # 网口映射（WAN=eth1）：没有它，未识别的机型不会生成 wan 接口
@@ -80,7 +82,7 @@ jobs:
           {
             echo 'CONFIG_TARGET_mediatek=y'
             echo 'CONFIG_TARGET_mediatek_filogic=y'
-            cat ../devices-pack/"$SLUG"/config.fragment
+            cat ../devices-pack/"$PACK_SLUG"/config.fragment
           } > .config
           echo "---- 基础配置 ----"; cat .config
 
@@ -132,7 +134,7 @@ jobs:
             p="$(printf '%s' "$p" | tr -d '\r' | sed 's/[[:space:]]*$//')"
             case "$p" in ''|'#'*) continue ;; esac
             grep -q "^CONFIG_PACKAGE_${p}=y$" .config || { echo "::warning::包未生效: $p"; miss=$((miss+1)); }
-          done < ../devices-pack/ew6000gx/packages.txt
+          done < ../devices-pack/"$PACK_SLUG"/packages.txt
           total=$(grep -c '^CONFIG_PACKAGE_.*=y$' .config || true)
           echo "选中包总数: $total ；被丢弃: $miss"
           for k in luci uhttpd luci-mod-admin-full luci-theme-vantage luci-app-store \
