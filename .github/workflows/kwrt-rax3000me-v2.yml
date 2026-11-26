@@ -550,6 +550,8 @@ jobs:
             [ -e "$f" ] || continue
             b=$(basename "$f")
             case "$b" in
+              *cmcc_rax3000me-v2*) : ;;  # 已是 V2 命名，跳过
+              *cmcc_rax3000me*) mv -f "$f" "out/${b//cmcc_rax3000me/cmcc_rax3000me-v2}" ;;
               *cmcc_rax3000m*) mv -f "$f" "out/${b//cmcc_rax3000m/cmcc_rax3000me-v2}" ;;
             esac
           done
@@ -663,6 +665,9 @@ jobs:
           fi
           cat > notes.md <<'EOF'
           Kwrt 25.12（immortalwrt/openwrt-25.12）· CMCC RAX3000M-e V2
+            > **V2 · 仅改交换机**：与官方原生版同源，唯一差异是在 DTS 末尾追加
+            > `&switch { status = "disabled"; }`，让 AN8855 独占 `reset-gpios = <&pio 39>`。
+            > 产物文件名带 `-v2`，不会和官方原生版混淆。官方原生版文件名不带 `-v2`。
 
           - 机型：MT7981B，AN8855 外挂交换机（3x GbE LAN + 2.5G 上行到 gmac0）；WAN 走 gmac1
           - 与默认版（rax3000me）同源，唯一差异是交换机：
@@ -679,7 +684,7 @@ jobs:
           for i in 1 2 3 4 5; do
             echo ">>> 第 $i 次上传"
             if ! gh release view "$TAG" >/dev/null 2>&1; then
-              gh release create "$TAG" --title "Kwrt 25.12 · RAX3000M-e V2 · ${DATE}" --notes-file notes.md || true
+              gh release create "$TAG" --title "Kwrt 25.12 · RAX3000M-e V2（禁用 MT7531 / AN8855 独占 reset）· ${DATE}" --notes-file notes.md || true
             fi
             if gh release upload "$TAG" rel/* --clobber; then
               echo ">>> 上传成功（第 $i 次）"; exit 0
