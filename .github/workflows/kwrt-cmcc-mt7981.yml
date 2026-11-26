@@ -246,7 +246,18 @@ jobs:
             # store 有 depends on !(PACKAGE_TAR_XZ) || PACKAGE_xz-utils：
             # tar 被依赖带入后 TAR_XZ 默认=y，xz-utils 不装的话 store 会被压成不可见
             echo "CONFIG_PACKAGE_xz-utils=y"
+            # 后台进不去的根因：diy.sh 删掉了 feeds 包里的 +luci/+uhttpd 依赖，
+            # common/.config 的 `CONFIG_PACKAGE_luci-nginx=y # nginx服务` 带行内注释走
+            # nginx-ssl，defconfig 后 luci-nginx/uhttpd 双双丢失 → SSH 能进、Web 打不开。
+            # 统一改标准 uhttpd，显式选入整条依赖链（DEPENDS 不会自动带包）。
+            for p in luci luci-base luci-mod-admin-full uhttpd uhttpd-mod-ubus \
+                     luci-theme-bootstrap; do
+              echo "CONFIG_PACKAGE_${p}=y"
+            done
+            echo "# CONFIG_PACKAGE_luci-nginx is not set"
           } >> .config
+          # 兜底：清掉基础配置里带行内注释的那行，避免 defconfig 又选中它
+          sed -i 's/^CONFIG_PACKAGE_luci-nginx=y.*/# CONFIG_PACKAGE_luci-nginx is not set/' .config
           make defconfig
           grep -qE '^CONFIG_PACKAGE_luci-i18n-base-zh-cn=y$' .config \
             || { echo "::error::简体中文语言包未生效"; exit 1; }
@@ -257,6 +268,14 @@ jobs:
             grep -qE "^CONFIG_PACKAGE_${s}=y$" .config \
               || { echo "::error::${s} 未生效（iStore 或中文包会缺失）"; exit 1; }
           done
+          # 后台硬断言：luci/uhttpd 任一缺失都会导致 SSH 能进、Web 打不开
+          for s in luci luci-base uhttpd uhttpd-mod-ubus; do
+            grep -qE "^CONFIG_PACKAGE_${s}=y$" .config \
+              || { echo "::error::${s} 未生效（LuCI 后台会进不去）"; exit 1; }
+          done
+          if grep -qE '^CONFIG_PACKAGE_luci-nginx=y$' .config; then
+            echo "::error::luci-nginx 与 uhttpd 冲突，二者只能选一"; exit 1
+          fi
           # 反向断言：quickstart 首页已全平台撤掉。它的 home 是独立单页壳子，
           # 靠 /admin/quickstart/* 的 XHR 拉数据，精简固件里后端起不来就白屏，
           # 连 vantage 的侧边栏（由页面自身渲染）一起消失。
