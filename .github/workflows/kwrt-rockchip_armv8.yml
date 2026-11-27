@@ -107,9 +107,8 @@ jobs:
       - name: 移除易漂移的 RK3568002 GIC 内核补丁
         run: |
           cd openwrt
-          p="target/linux/rockchip/patches-6.12/022-v6.15-irqchip-gic-v3-Add-Rockchip-3568002-erratum-workaround.patch"
-          rm -f "$p"
-          echo "已移除 $p，改在内核源码准备后幂等注入"
+          rm -f target/linux/rockchip/patches-6.12/*3568002*.patch
+          echo "已移除所有 3568002 内核补丁（含上游 030-03），改在内核源码准备后幂等注入"
 
       - name: 生成 .config（Kwrt common + 本 target 机型）
         run: |
@@ -188,7 +187,7 @@ jobs:
         run: |
           cd openwrt
           set -o pipefail
-          make -j1 V=s target/linux/prepare 2>&1 | tail -500
+          make -j"$(( $(nproc) + 1 ))" target/linux/prepare 2>&1 | tail -200
           f=$(find build_dir/target-*/linux-rockchip_armv8 -maxdepth 1 -type d -name 'linux-6.12.*' | head -1)/drivers/irqchip/irq-gic-v3-its.c
           [ -f "$f" ] || { echo "::error::未找到内核源码 $f"; exit 1; }
           python3 - "$f" <<'PY'
