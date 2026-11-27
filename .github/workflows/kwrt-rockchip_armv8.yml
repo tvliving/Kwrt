@@ -187,7 +187,8 @@ jobs:
       - name: 注入 RK3568002 GIC 修复（源码级，幂等）
         run: |
           cd openwrt
-          make -j"$(( $(nproc) + 1 ))" target/linux/prepare
+          set -o pipefail
+          make -j1 V=s target/linux/prepare 2>&1 | tail -500
           f=$(find build_dir/target-*/linux-rockchip_armv8 -maxdepth 1 -type d -name 'linux-6.12.*' | head -1)/drivers/irqchip/irq-gic-v3-its.c
           [ -f "$f" ] || { echo "::error::未找到内核源码 $f"; exit 1; }
           python3 - "$f" <<'PY'
