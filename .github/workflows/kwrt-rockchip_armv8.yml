@@ -104,20 +104,12 @@ jobs:
           chmod +x devices/common/diy.sh
           /bin/bash devices/common/diy.sh
 
-      - name: 修正 RK3568002 GIC 补丁以匹配 6.12.118 内核
+      - name: 移除易漂移的 RK3568002 GIC 内核补丁
         run: |
           cd openwrt
           p="target/linux/rockchip/patches-6.12/022-v6.15-irqchip-gic-v3-Add-Rockchip-3568002-erratum-workaround.patch"
-          if grep -q '^LINUX_VERSION-6.12 = .118$' target/linux/generic/kernel-6.12 2>/dev/null; then
-            if [ -f "devices/rockchip_armv8/kernel-patches/022-v6.15-irqchip-gic-v3-Add-Rockchip-3568002-erratum-workaround.patch" ]; then
-              cp -f "devices/rockchip_armv8/kernel-patches/022-v6.15-irqchip-gic-v3-Add-Rockchip-3568002-erratum-workaround.patch" "$p"
-              echo "已用 6.12.118 适配版替换 $p"
-            else
-              echo "::warning::找不到 6.12.118 适配补丁，沿用上游版本"
-            fi
-          else
-            echo "内核版本非 6.12.118，沿用上游补丁"
-          fi
+          rm -f "$p"
+          echo "已移除 $p，改在内核源码准备后幂等注入"
 
       - name: 生成 .config（Kwrt common + 本 target 机型）
         run: |
@@ -191,6 +183,59 @@ jobs:
             echo "== targetinfo 中 x86 =="; grep -i "x86" tmp/.targetinfo 2>/dev/null | head -10 || true
             exit 1
           }
+
+      - name: 注入 RK3568002 GIC 修复（源码级，幂等）
+        run: |
+          cd openwrt
+          make -j"$(( $(nproc) + 1 ))" target/linux/prepare
+          f=$(find build_dir/target-*/linux-rockchip_armv8 -maxdepth 1 -type d -name 'linux-6.12.*' | head -1)/drivers/irqchip/irq-gic-v3-its.c
+          [ -f "$f" ] || { echo "::error::未找到内核源码 $f"; exit 1; }
+          python3 - "$f" <<'PY'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding="utf-8").read()
+          before = s
+          if "rk3568002_gfp_flags" not in s:
+              anchor = "static DEFINE_IDA(its_vpeid_ida);"
+              if anchor not in s:
+                  raise SystemExit("its_vpeid_ida anchor missing")
+              s = s.replace(anchor, anchor + "\n\nstatic gfp_t rk3568002_gfp_flags;", 1)
+              s = s.replace("GFP_KERNEL | __GFP_ZERO, order)",
+                            "GFP_KERNEL | __GFP_ZERO | rk3568002_gfp_flags, order)")
+              s = s.replace("GFP_KERNEL | __GFP_ZERO,\n\t\t\t\t\tget_order(baser->psz));",
+                            "GFP_KERNEL | __GFP_ZERO | rk3568002_gfp_flags,\n\t\t\t\t\tget_order(baser->psz));")
+              s = s.replace("GFP_KERNEL | __GFP_ZERO,\n\t\t\t\tget_order(ITS_CMD_QUEUE_SZ));",
+                            "GFP_KERNEL | __GFP_ZERO | rk3568002_gfp_flags,\n\t\t\t\tget_order(ITS_CMD_QUEUE_SZ));")
+              marker = "static bool __maybe_unused its_enable_quirk_hip09_162100801(void *data)"
+              if marker not in s:
+                  raise SystemExit("hip09 quirk anchor missing")
+              func = (
+                  "static bool __maybe_unused its_enable_rk3568002(void *data)\n"
+                  "{\n"
+                  "\tif (!of_machine_is_compatible(\"rockchip,rk3566\") &&\n"
+                  "\t    !of_machine_is_compatible(\"rockchip,rk3568\"))\n"
+                  "\t\treturn false;\n\n"
+                  "\trk3568002_gfp_flags |= GFP_DMA32;\n\n"
+                  "\treturn true;\n"
+                  "}\n\n"
+              )
+              s = s.replace(marker, func + marker, 1)
+              a = s.index("static const struct gic_quirk its_quirks[] = {")
+              e = s.index("\n};", a)
+              arr = s[a:e]
+              entry = (
+                  "\t{\n"
+                  "\t\t.desc   = \"ITS: Rockchip erratum RK3568002\",\n"
+                  "\t\t.iidr   = 0x0201743b,\n"
+                  "\t\t.mask   = 0xffffffff,\n"
+                  "\t\t.init   = its_enable_rk3568002,\n"
+                  "\t},\n"
+              )
+              arr = arr.replace("\t{\n\t}", entry + "\t{\n\t}", 1)
+              s = s[:a] + arr + s[e:]
+          open(p, "w", encoding="utf-8").write(s)
+          print("RK3568002 GIC injection changed:", s != before, p)
+          PY
 
       - name: 编译固件
         run: |
