@@ -106,6 +106,23 @@ exit 0
 EOF
 chmod +x files/etc/uci-defaults/98-lan-ip
 
+# 首页落地页：强制 LuCI /admin 的 firstchild = 状态-概览。
+# kiddin9 feed 的 luci-app-vantage 注册了 admin/status/dashboard（order 1），
+# 与 luci-mod-status 的 admin/status/overview（order 1）同权；实际表现是
+# 点「首页」落到 vantage 仪表盘而不是「状态-概览」。仅撤 quickstart 不够，
+# 这里用更高优先级的 menu.d 覆盖，把 dashboard 排除出 firstchild 候选
+# （页面本身仍可从菜单访问，不影响功能）。
+mkdir -p files/usr/share/luci/menu.d
+cat > files/usr/share/luci/menu.d/zzz-kwrt-homepage.json <<'EOF'
+{
+  "admin/status/dashboard": {
+    "title": "Dashboard",
+    "order": 9999,
+    "firstchild_ineligible": true
+  }
+}
+EOF
+
 echo "== 6/7 品牌：VERSION_DIST 固定为 Kwrt =="
 # VERSION_DIST 定义在 package/base-files/image-config.in 的 `if VERSIONOPT` 里，
 # 只有 IMAGEOPT/VERSIONOPT 全开时该符号才可见；否则 make defconfig 会把它删掉，
