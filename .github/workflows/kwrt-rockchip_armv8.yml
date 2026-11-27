@@ -183,8 +183,17 @@ jobs:
           cd openwrt
           df -hT
           make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log || {
-            echo "::warning::并行编译失败，取错误日志"
-            grep -nE 'Error [0-9]+|error:|No rule to make target' build.log | tail -40 || true
+            echo "::warning::并行编译失败，单线程 V=s 复现以保留完整错误"
+            fail_line="$(grep -m1 'ERROR: .* failed to build' build.log || true)"
+            fail="$(printf '%s' "$fail_line" | sed -n 's/.*ERROR: \([^ ]*\).*/\1/p')"
+            if [ -n "$fail" ]; then
+              case "$fail" in
+                target/linux*) echo ">>> 内核/镜像阶段失败：$fail"; make -j1 V=s "target/linux/compile" 2>&1 | tail -300 || true ;;
+                *) make -j1 V=s "$fail/compile" 2>&1 | tail -300 || true ;;
+              esac
+            else
+              make -j1 V=s 2>&1 | tail -300 || true
+            fi
             exit 1
           }
           df -hT
