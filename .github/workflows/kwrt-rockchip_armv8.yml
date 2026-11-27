@@ -192,8 +192,11 @@ jobs:
         run: |
           set -o pipefail
           cd openwrt
-          # 最后一刻清理：上游 030-03 面向 6.12.119，且后续步骤可能重新生成 022 副本。
-          # 只保留一份 6.12.118 适配版，避免两份 GIC 补丁同时打导致 hunk#1 失败。
+          # 最后一刻清理：diy.sh 会整棵重克隆 lede 的 rockchip 补丁树，
+          # 其中面向 6.12.119+ 的补丁引用 rk356x-base.dtsi（6.12.118 无此文件）
+          # 或有 its_alloc_pages_node，打在 6.12.118 上必然 "can't find file to patch"。
+          # 按内容动态删除，不按文件名枚举，避免再次漏掉（如 112-... 补丁）。
+          grep -rl 'rk356x-base.dtsi' target/linux/rockchip/patches-6.12/ 2>/dev/null | xargs -r rm -f
           rm -f target/linux/rockchip/patches-6.12/*3568002*.patch \
             target/linux/rockchip/patches-6.12/023-0[12]-v6.15-arm64-dts-rockchip-rk356x-*.patch
           cp -f devices/rockchip_armv8/kernel-patches/022-v6.15-irqchip-gic-v3-Add-Rockchip-3568002-erratum-workaround.patch \
