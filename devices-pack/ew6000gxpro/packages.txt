@@ -12,6 +12,7 @@ kmod-mt7915e
 kmod-mt7986-firmware
 mt7986-wo-firmware
 kmod-phy-airoha-en8811h
+iwinfo
 
 # ---- LuCI 基础 ----
 luci
