@@ -104,6 +104,21 @@ jobs:
           chmod +x devices/common/diy.sh
           /bin/bash devices/common/diy.sh
 
+      - name: 修正 RK3568002 GIC 补丁以匹配 6.12.118 内核
+        run: |
+          cd openwrt
+          p="target/linux/rockchip/patches-6.12/022-v6.15-irqchip-gic-v3-Add-Rockchip-3568002-erratum-workaround.patch"
+          if grep -q '^LINUX_VERSION-6.12 = .118$' include/kernel-6.12 2>/dev/null; then
+            if [ -f "devices/rockchip_armv8/kernel-patches/022-v6.15-irqchip-gic-v3-Add-Rockchip-3568002-erratum-workaround.patch" ]; then
+              cp -f "devices/rockchip_armv8/kernel-patches/022-v6.15-irqchip-gic-v3-Add-Rockchip-3568002-erratum-workaround.patch" "$p"
+              echo "已用 6.12.118 适配版替换 $p"
+            else
+              echo "::warning::找不到 6.12.118 适配补丁，沿用上游版本"
+            fi
+          else
+            echo "内核版本非 6.12.118，沿用上游补丁"
+          fi
+
       - name: 生成 .config（Kwrt common + 本 target 机型）
         run: |
           function git_clone_path() {
