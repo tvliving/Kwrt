@@ -192,6 +192,12 @@ jobs:
         run: |
           set -o pipefail
           cd openwrt
+          # 最后一刻清理：上游 030-03 面向 6.12.119，且后续步骤可能重新生成 022 副本。
+          # 只保留一份 6.12.118 适配版，避免两份 GIC 补丁同时打导致 hunk#1 失败。
+          rm -f target/linux/rockchip/patches-6.12/*3568002*.patch
+          cp -f devices/rockchip_armv8/kernel-patches/022-v6.15-irqchip-gic-v3-Add-Rockchip-3568002-erratum-workaround.patch \
+            target/linux/rockchip/patches-6.12/030-03-v6.15-irqchip-gic-v3-Add-Rockchip-3568002-erratum-workaround.patch
+          grep -c '^@@' target/linux/rockchip/patches-6.12/030-03-v6.15-irqchip-gic-v3-Add-Rockchip-3568002-erratum-workaround.patch
           df -hT
           make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log || {
             echo "::warning::并行编译失败，单线程 V=s 复现以保留完整错误"
