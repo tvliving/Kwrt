@@ -196,9 +196,15 @@ jobs:
           # 其中面向 6.12.119+ 的补丁引用 rk356x-base.dtsi（6.12.118 无此文件）
           # 或有 its_alloc_pages_node，打在 6.12.118 上必然 "can't find file to patch"。
           # 按内容动态删除，不按文件名枚举，避免再次漏掉（如 112-... 补丁）。
+          # 另外必须删掉把 rk3568.dtsi 的 msi-map 改成 &its 的 110 补丁：
+          # 6.12.118 原生 rk3568.dtsi 用 <&gic>（MBI），110 引入 &its 引用，
+          # 而定义 its 节点的 023-01 已被上面删除，保留 110 会导致 dtb 编译报
+          # "Reference to non-existent node or label its"（rk3568-bpi-r2-pro.dtb）。
+          # 删掉 110 后 pcie 用回内核原生 &gic，6.12.118 原生支持，无需 its 节点。
           grep -rl 'rk356x-base.dtsi' target/linux/rockchip/patches-6.12/ 2>/dev/null | xargs -r rm -f
           rm -f target/linux/rockchip/patches-6.12/*3568002*.patch \
-            target/linux/rockchip/patches-6.12/023-0[12]-v6.15-arm64-dts-rockchip-rk356x-*.patch
+            target/linux/rockchip/patches-6.12/023-0[12]-v6.15-arm64-dts-rockchip-rk356x-*.patch \
+            target/linux/rockchip/patches-6.12/110-arm64-rk3568-update-gicv3-its-and-pci-msi-map.patch
           cp -f devices/rockchip_armv8/kernel-patches/022-v6.15-irqchip-gic-v3-Add-Rockchip-3568002-erratum-workaround.patch \
             target/linux/rockchip/patches-6.12/030-03-v6.15-irqchip-gic-v3-Add-Rockchip-3568002-erratum-workaround.patch
           grep -c '^@@' target/linux/rockchip/patches-6.12/030-03-v6.15-irqchip-gic-v3-Add-Rockchip-3568002-erratum-workaround.patch
